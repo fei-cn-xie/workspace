@@ -1,5 +1,6 @@
 
 > 本内容基于：https://www.bilibili.com/video/BV1iz4y1L7tA  
+> [https://github.com/jinfeihan57/start_A_c_cpp_project ](https://github.com/jinfeihan57/learn_SDL2) 
 # 1. SDL简介
 
 ## 1.1 简介
