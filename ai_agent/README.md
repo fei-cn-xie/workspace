@@ -48,3 +48,11 @@ print(res2.to_string())
 将组件串联，上一个组件的输出作为下一个组件的输入,是LangChain链(尤其是| 管道链)的核心工作原理，这也是链式调用的核心价值:实现数据的自动化流转与组件的协同工作，如下。  
 `chain = prompt_template | model`  
 **核心前提**: 即Runnable子类对象才能入链(以及callable、Mapping接口子类对象也可加入(后续了解用的不多))   
+
+```python
+# 顺序必须是 prompt -> model, 实际等于 model.invoke(prompt.invoke(msg))
+
+chain : RunnableSerializable = chat_template | model
+```
+
+> `|` 是langchain_core.runnables.base.RunnableSerializable中定义的`__or__`
