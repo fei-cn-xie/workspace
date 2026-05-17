@@ -1,6 +1,7 @@
 > 课程： https://www.bilibili.com/video/BV1yjz5BLEoY  
 
 ### format和invoke区别
+> [base_promptTemplate.py](rag/base_promptTemplate.py)
 
 ```mermaid
 graph TD
@@ -33,9 +34,17 @@ print(res)
 # 通过 invoke 方法进行字符串格式化
 res2 = template.invoke({"word": "大", "definition": "尺寸或体积较大的", "antonym": "小"})
 print(res2.to_string())
-```
+``` 
+
+### 各类Prompt模板类
+
+- PromptTemplate: 通用提示词模板，支持注入动态信息
+- FewShotPromptTemplate:支持基于模板注入任意数量的示例信息
+- ChatPromptTemplate: 支持注入任意数量的历史会话信息
 
 
+## Chain链
 
-
-
+将组件串联，上一个组件的输出作为下一个组件的输入,是LangChain链(尤其是| 管道链)的核心工作原理，这也是链式调用的核心价值:实现数据的自动化流转与组件的协同工作，如下。  
+`chain = prompt_template | model`  
+**核心前提**: 即Runnable子类对象才能入链(以及callable、Mapping接口子类对象也可加入(后续了解用的不多))   
