@@ -208,3 +208,14 @@ print("result : ", chain.invoke(data))
 ```
 
 ### 自定义函数加入链
+```python
+chain = first_prompt | model | json_parser | second_prompt | model | str_parser
+```
+
+> 前文我们根据JsonoutputParser完成了多模型执行链条的构建。除了JsonOutputParser这类固定功能的解析器之外
+> 我们也可以自己编写Lambda匿名函数来完成自定义逻辑的数据转换，想怎么转换就怎么转换，更自由。  
+> **想要完成这个功能，可以基于RunnableLambda类实现。**
+> RunnableLambda类是LangChain内置的，将普通函数等转换为Runnable接口实例，方便自定义函数加入chain。
+> 语法:  
+> `RunnableLambda(函数对象或lambda匿名函数)`
+
