@@ -56,3 +56,155 @@ chain : RunnableSerializable = chat_template | model
 ```
 
 > `|` 是langchain_core.runnables.base.RunnableSerializable中定义的`__or__`
+
+
+
+### `|`符号的重写
+
+前文代码中: `chain= chat prompt templatemodel`在语法上使用了`|`运算符的重写  
+在Python中，运算符(如`+`、`|`)的行为由类的魔法方法决定。例如:  
+- `a+b` 本质调用的是`a.__add__(b)`
+- `a | b`本质调用的是`a.__or__(b)`  
+
+只需要自行实现类的`__or__`方法，即可对`|`符号的功能进行重写。  
+示例:  
+- 让`a | b | c`的代码得到一个自定义的类对象(类似列表即[a，b，c])  
+- 调用`run`方法依次输出`a、b、c`
+
+```python
+class TestOr(object):
+    """
+    让`a | b | c`的代码得到一个自定义的类对象(类似列表即[a,b,c]) 
+    """
+    def __init__(self, *args):
+        self.arr : list = []
+        for arg in args:
+            self.arr.append(arg)
+    
+    def __str__(self):
+        return f"TestOr({self.arr})"
+
+    def __or__(self, other):
+        return TestOr(*self.arr, other)
+    
+    def run(self):
+        print(*self.arr)
+
+# *号代表打包或者拆包一个元组或list
+
+a = TestOr("a")
+my_chain = a | "b" | "c"
+
+print(my_chain)
+
+my_chain.run()
+
+```
+
+
+### `StrOutputParser`字符串输出解析器
+
+> StrOutputParser是LangChain内置的简单字符串解析器  
+> 可以将AIMessage解析为简单的字符串，符合了模型invoke方法要求(可传入字符串，不接收AIMessage类型)  
+> 是Runnable接口的子类(可以加入链)
+
+- 用法
+
+```python
+
+from langchain_ollama import OllamaLLM
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.runnables.base import RunnableSerializable, RunnableSequence
+from langchain_core.output_parsers import StrOutputParser
+
+
+model = OllamaLLM(model="qwen3:8b")
+
+prompt = ChatPromptTemplate([
+    ("system", "你是一个英语老师，帮助用户完成英语学习。当用户询问单词时，不要生成过多的内容，尽最大可能精简回答"),
+    MessagesPlaceholder("history"),
+    ("human", "瓶子的英文是什么？")
+])
+
+chain = prompt | model 
+
+
+
+history_msg = [
+    ("human", "盒子的英文是什么？"),
+    ("ai", "盒子=box")
+]
+
+print("prompt invoke: ", type(prompt.invoke({"history": history_msg})))
+print("model invoke type: ", type(chain.invoke({"history": history_msg})))
+print("chain type: ", type(chain))
+
+print(chain.invoke({"history": history_msg}))
+
+# 使用StrOutputParser-字符串输出解析器
+
+output_parsers = StrOutputParser()
+
+chain = chain | output_parsers | model
+
+print(chain.invoke({"history": history_msg}))
+
+
+```
+
+### `JsonOutputParser` Json输出解析器
+
+![alt text](README/image.png)
+
+```python
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
+from langchain_ollama import OllamaLLM
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder, PromptTemplate
+from langchain_core.runnables.base import RunnableSerializable, RunnableSequence
+
+model = OllamaLLM(model="qwen3:8b")
+
+first_prompt = PromptTemplate.from_template(
+    "我姓:{lastname}, 生了个{gender}, 帮我给孩子取个名，并封装为json格式返回给我"
+    "要求key是name, value是起的名。"
+    "请严格遵守格式要求, 无任何多余字符串"
+)
+
+json_parser = JsonOutputParser()
+
+chain = first_prompt | model
+print( "============= start up ======== ")
+
+data = {"lastname": "谢", "gender": "儿子"}
+
+output = chain.invoke(data)
+
+
+print("first_prompt | model -> ", type(output), " value = ", output)
+
+print( "=================================")
+
+chain = chain | json_parser
+
+print("jsonparse type is -> ", type(chain), " value = ", chain)
+
+print( "=================================")
+
+second_prompt = PromptTemplate.from_template(
+    "名字是{name}, 请解析其含义"
+)
+
+chain = chain | second_prompt
+
+print("second prompt is = ", chain)
+
+print( "=================================")
+
+chain = chain | model
+
+print("result : ", chain.invoke(data))
+
+
+```
+
+### 自定义函数加入链
