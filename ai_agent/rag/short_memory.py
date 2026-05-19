@@ -29,8 +29,8 @@ conversation_chain = RunnableWithMessageHistory(
 
 session_config = {"configurable" : {"session_id" : "chat_001"}} # 格式固定
 
-print(conversation_chain.invoke({"input": "小明有9条狗"}, session_config ) )
-print(conversation_chain.invoke({"input": "Jack有3条狗"}, session_config ) )
-print(conversation_chain.invoke({"input": "小明和Jack一共有几条狗？"}, session_config ) )
+print(conversation_chain.invoke({"input": "小明今年有9条狗"}, session_config ) )
+print(conversation_chain.invoke({"input": "Jack去年有3条狗，死了2条狗，今年又买了1条狗"}, session_config ) )
+print(conversation_chain.invoke({"input": "小明和Jack今年一共有几条狗？"}, session_config ) )
 
 

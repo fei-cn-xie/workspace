@@ -1,5 +1,7 @@
 > 课程： https://www.bilibili.com/video/BV1yjz5BLEoY  
 
+# 1. RAG开发
+
 ### format和invoke区别
 > [base_promptTemplate.py](rag/base_promptTemplate.py)
 
@@ -263,8 +265,13 @@ session_config = {"configurable" : {"session_id" : "chat_001"}} # 格式固定
 print(conversation_chain.invoke({"input": "小明有9条狗"}, session_config ) )
 print(conversation_chain.invoke({"input": "Jack有3条狗"}, session_config ) )
 print(conversation_chain.invoke({"input": "小明和Jack一共有几条狗？"}, session_config ) )
-
-
-
 ```
 
+
+
+
+
+# 2. RAG项目
+
+
+# 3. Agent项目
