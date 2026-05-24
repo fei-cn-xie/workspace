@@ -497,4 +497,12 @@ print(similar_docs)
 # 2. RAG项目
 
 
+![离线流程与在线流程](README/image-1.png)
+
+![主要代码文件](README/image-2.png)
+
+
+
+
+
 # 3. Agent项目
