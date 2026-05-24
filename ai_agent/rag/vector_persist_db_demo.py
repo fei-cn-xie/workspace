@@ -26,5 +26,8 @@ print("+=*" * 20)
 vector_store.add_documents(documents=doc)
 
 # 相似性搜索, 4代表结果个数
-similar_docs = vector_store.similarity_search("三百万信用点", 1)
+similar_docs = vector_store.similarity_search(
+    "三百万信用点", 
+    1,
+    filter={"source": "黑马"}) #  过滤内容
 print(similar_docs)
