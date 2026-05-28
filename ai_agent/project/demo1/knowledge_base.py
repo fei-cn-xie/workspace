@@ -5,6 +5,12 @@
 import os
 import config_data as config
 import hashlib
+from langchain_chroma import Chroma
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from datetime import datetime
+
+embedding_model = OllamaEmbeddings(model="nomic-embed-text-v2-moe:latest")
 
 def check_md5(md5_str: str):
     """检查传入的md5字符串是否已经被处理过了"""
@@ -45,18 +51,51 @@ def convert_to_md5(text:str, encoding:str="utf-8") -> str:
 class KnowledgeBaseService(object):
 
     def __init__(self):
-        self.chroma = None # 向量存储的实例 Chroma向量库对象
-        self.spliter = None # 文本分割器的对象
+        # 如果文件夹不存在则创建,如果存在则跳过
+        os.makedirs(config.persist_directory, exist_ok=True)
+        self.chroma = Chroma(
+            collection_name=config.collection_name, # 数据库的表名
+            embedding_function=embedding_model,
+            persist_directory=config.persist_directory, # 数据库本地存储文件夹
+        ) # 向量存储的实例 Chroma向量库对象
+        self.spliter = RecursiveCharacterTextSplitter(
+            chunk_size=config.chunk_size, # 分割后的文本段最大长度
+            chunk_overlap=config.chunk_overlap, # 连续文本段之间的字符重叠数量
+            separators=config.separators, # 段落划分的符号
+            length_function=len, # 长度统计使用什么函数
+            
+        ) # 文本分割器的对象
 
-    def upload_by_str(self, data:str, name:str):
+    def upload_by_str(self, data:str, filename:str):
         """
         将传入的字符串向量化.存入到向量数据库中
         """
-        pass
+        md5_hex = convert_to_md5(data)
+        if(check_md5(md5_hex)):
+            return "内容已经存在知识库中"
+        knowledge_chunks: list[str] = []
+        if len(data) > config.max_split_char_number:
+            knowledge_chunks = self.spliter.split_text(data)
+        else:
+            knowledge_chunks = [data]
+
+        metadata = {
+            "source": filename,
+            "create_time": datetime.now().strftime("%Y-%m-%d %H-%M-%S"),
+            "operator": "Fei",
+
+        }
+        # 内容加载到向量数据库
+        self.chroma.add_texts(
+            knowledge_chunks,
+            metadatas=[metadata for _ in knowledge_chunks]
+        )
+
+        # 记录数据已存储
+        save_md5(md5_hex)
+        return "[Success] 内容成功载入向量数据库"
 
 if __name__ == "__main__":
-    r = check_md5("7a8941058aaf4df5147042ce104568da")
-    print(r)
-    save_md5("7a8941058aaf4df5147042ce104568da")
-    r = check_md5("7a8941058aaf4df5147042ce104568da")
+    ks = KnowledgeBaseService()
+    r = ks.upload_by_str("州街道", "testfile")
     print(r)
