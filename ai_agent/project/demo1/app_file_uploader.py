@@ -1,9 +1,22 @@
 """
 基于Streamlit完成web网页上传服务
 pip install streamlit
+
+# 运行
+streamlit run app_file_uploader.py
+
+streamlit特点: 网页刷新会导致代码重跑一边。 存在的问题：会导致代码状态重置。比如全局变量等内容。
+因此可以使用streamlit.session_state['key'] = value 能够记录状态，持续存在。
+
 """
 
 import streamlit as st
+from knowledge_base import KnowledgeBaseService
+
+
+if "service" not in st.session_state:
+    st.session_state["service"] = KnowledgeBaseService()
+
 
 st.title("知识库更新服务")
 
@@ -22,4 +35,8 @@ if uploaded_file is not None:
 
     # get_value
     text = uploaded_file.getvalue().decode("utf-8")
-    st.write(text)
+    # st.write(text)
+    with st.spinner("载入知识库中..."):
+        result = st.session_state["service"].upload_by_str(text, file_name)
+        st.write(result)
+
