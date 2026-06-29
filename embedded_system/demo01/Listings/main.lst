@@ -1,0 +1,52 @@
+C51 COMPILER V9.60.0.0   MAIN                                                              05/25/2026 22:42:15 PAGE 1   
+
+
+C51 COMPILER V9.60.0.0, COMPILATION OF MODULE MAIN
+OBJECT MODULE PLACED IN .\Objects\main.obj
+COMPILER INVOKED BY: D:\Keil_v5\C51\BIN\C51.EXE main.c OPTIMIZE(8,SPEED) BROWSE DEBUG OBJECTEXTEND PRINT(.\Listings\main
+                    -.lst) TABS(2) OBJECT(.\Objects\main.obj)
+
+line level    source
+
+   1          #include <reg52.h>
+   2          // Keil C51不是标准C语言，它是针对8051单片机设计的C语言扩展。
+   3          // 注意，这里的 ^ 不是“平方”或“异或”！在Keil C51的sbit语法中，
+   4          // ^ 是“位选取”符号。P2^5 的意思就是：从P2这个端口（一个字节）里，选出第5
+             -号引脚（也就是第6个引脚，因为从0开始）。
+   5          sbit led = P2^7;
+   6          
+   7          //带参延时函数
+   8          void delay_ms(unsigned int xms)   //@12MHz
+   9          {
+  10   1          unsigned int i, j;
+  11   1          for(i=xms;i>0;i--)
+  12   1          {
+  13   2              for(j=124;j>0;j--)
+  14   2              {}
+  15   2          }
+  16   1      }
+  17          
+  18          void main()
+  19          {
+  20   1          while(1)
+  21   1          {
+  22   2            led = 0;
+  23   2            delay_ms(500);
+  24   2            led = 1;
+  25   2            delay_ms(500);
+  26   2          }
+  27   1      }
+
+
+MODULE INFORMATION:   STATIC OVERLAYABLE
+   CODE SIZE        =     50    ----
+   CONSTANT SIZE    =   ----    ----
+   XDATA SIZE       =   ----    ----
+   PDATA SIZE       =   ----    ----
+   DATA SIZE        =   ----    ----
+   IDATA SIZE       =   ----    ----
+   BIT SIZE         =   ----    ----
+END OF MODULE INFORMATION.
+
+
+C51 COMPILATION COMPLETE.  0 WARNING(S),  0 ERROR(S)
