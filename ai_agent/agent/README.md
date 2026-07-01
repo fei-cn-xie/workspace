@@ -31,3 +31,31 @@ for chunk in agent.stream({
 Agent ReAct 是大模型智能体的核心思考与行动框架，全称Reasoning+Acting(推理+行动)，是让Agent 像人类一样`「思考问题>制定策略>执行行动>验证结果」`的关键逻辑。  
 简单来说:ReAct让Agent不再是“直接回答问题”，而是通过“自然语言思考过程”指导工具调用，一步步解决复杂问题，完美适配需要多步推理、工具协作的场景(如智能客服、报告生成、任务规划等)
 
+
+
+# middleware中间件
+
+中间件的作用是对智能体的每一步工作进行控制和自定义的执行。作用场景:
+- 日志记录、分析、调试
+- 转换提示词、工具选择
+- 重试、备用、提前终止等逻辑控制安全防护、个人身份检测等
+![alt text](README/image.png)
+
+![alt text](README/image-1.png)
+
+
+> langchain的中间件： https://docs.langchain.com/oss/python/langchain/middleware/built-in
+
+## Hooks
+
+中间件通过Hooks钩子来实现拦截，自定义中间件可以简单的使用装饰器来定义。  
+- 节点式钩子(执行点顺序拦截):
+  - before_agent:agent执行之前拦截
+  - after_agent:agent执行后拦截
+  - before_model:模型执行前拦截
+  - after_model:模型执行后拦截
+- 针对工具和模型的包装式钩子:
+  - wrap_model_call:每个模型调用时候拦截
+  - wrap_tool_call:每个工具调用时候拦截
+
+![alt text](README/image-2.png)
