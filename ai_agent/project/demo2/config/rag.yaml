@@ -1,0 +1,2 @@
+chat_model_name: qwen3:8b
+embedding_model_name: nomic-embed-text-v2-moe:latest

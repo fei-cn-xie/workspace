@@ -1,0 +1,9 @@
+2026-07-05 19:36:55,842 - agent - INFO - logger_handler.py:52 - 信息日志
+2026-07-05 19:36:55,842 - agent - ERROR - logger_handler.py:53 - 错误日志
+2026-07-05 19:36:55,842 - agent - DEBUG - logger_handler.py:54 - 调试日志
+2026-07-05 19:36:55,842 - agent - WARNING - logger_handler.py:55 - 警告日志
+2026-07-05 20:36:09,970 - agent - ERROR - prompt_loader.py:16 - [load_system_prompts]解析系统提示词出错，open() got an unexpected keyword argument 'endcoding'. Did you mean 'encoding'?
+2026-07-05 23:42:48,328 - agent - WARNING - agent_tools.py:77 - [generate_external_data]未能检索到1002在2025-3的使用数据
+2026-07-05 23:43:08,001 - agent - WARNING - agent_tools.py:77 - [generate_external_data]未能检索到1002在2025-1的使用数据
+2026-07-05 23:45:44,966 - agent - WARNING - agent_tools.py:77 - [generate_external_data]未能检索到1002在2025-1的使用数据
+2026-07-05 23:47:17,699 - agent - WARNING - agent_tools.py:77 - [generate_external_data]未能检索到1002在2025-1的使用数据
