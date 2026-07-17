@@ -35,8 +35,8 @@ def get_current_month():
     month = ["2025-" + f"{(m + 1):02d}" for m in range(12)]
     return random.choice(month)
 
-# @tool(description="从外部系统中获取指定用户在指定月份的使用记录")
-def generate_external_data(user_id: str, month: str):
+@tool(description="从外部系统中获取指定用户在指定月份的使用记录")
+def fetch_external_data(user_id: str, month: str):
     """
     {
         "user_id": {
@@ -83,4 +83,4 @@ def fill_context_for_report():
 
 if __name__ == "__main__":
     print(get_user_id())
-    print(generate_external_data(get_user_id(), get_current_month()))
+    # print(generate_external_data(get_user_id(), get_current_month()))

@@ -3,7 +3,7 @@ from typing import Optional
 from langchain_core.embeddings import Embeddings
 from langchain_community.embeddings import OllamaEmbeddings
 from langchain_core.language_models import BaseLanguageModel
-from langchain_ollama import OllamaLLM
+from langchain_ollama import OllamaLLM, ChatOllama
 from utils.config_handler import rag_config
 
 class BaseModelFactory(ABC):
@@ -14,7 +14,7 @@ class BaseModelFactory(ABC):
 
 class ChatModelFactory(BaseModelFactory):
     def generator(self) -> Optional[Embeddings | BaseLanguageModel]:
-        return OllamaLLM(model=rag_config["chat_model_name"])
+        return ChatOllama(model=rag_config["chat_model_name"])
     
 
 class EmbeddingsFactory(BaseModelFactory):

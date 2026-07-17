@@ -11,7 +11,9 @@ def load_system_prompts():
         raise e
 
     try:
-        return open(system_prompt_path, 'r', encoding='utf-8').read()
+        system_prompt = open(system_prompt_path, 'r', encoding='utf-8').read()
+        # logger.info(f"[load_system_prompts] {system_prompt} \n")
+        return system_prompt
     except Exception as e:
         logger.error(f"[load_system_prompts]解析系统提示词出错，{str(e)}")
         raise e
