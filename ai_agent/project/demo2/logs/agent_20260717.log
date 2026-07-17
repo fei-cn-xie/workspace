@@ -1008,3 +1008,31 @@
 2026-07-17 23:04:41,836 - agent - INFO - middleware.py:64 - [log_before_model]即将调用模型, 带有11条消息
 2026-07-17 23:04:41,836 - agent - DEBUG - middleware.py:65 - [log_before_model] ToolMessage | {"特征": "70㎡公寓 | 情侣 | 瓷砖", "效率": "覆盖率:87%\\n避障失败:3次/周（电线+拖鞋）", "耗材": "边刷磨损:中度+\\n尘盒清理:每2天", "对比": "拖地功能使用率低于同类33%"}
 2026-07-17 23:04:41,836 - agent - INFO - middleware.py:72 - [report_prompt_switch] is_report =  True
+2026-07-17 23:13:45,515 - agent - INFO - middleware.py:65 - [log_before_model]即将调用模型, 带有1条消息
+2026-07-17 23:13:45,515 - agent - DEBUG - middleware.py:66 - [log_before_model] HumanMessage | 我所在地区的机器人如何保养？并查询我过去的使用报告
+2026-07-17 23:13:45,515 - agent - INFO - middleware.py:73 - [report_prompt_switch] is_report =  False
+2026-07-17 23:14:02,726 - agent - INFO - middleware.py:42 - [tool monitor]执行工具：get_user_location
+2026-07-17 23:14:02,727 - agent - INFO - middleware.py:43 - [tool monitor]传入的参数：{}
+2026-07-17 23:14:02,727 - agent - INFO - middleware.py:42 - [tool monitor]执行工具：fill_context_for_report
+2026-07-17 23:14:02,728 - agent - INFO - middleware.py:47 - [tool monitor] get_user_location 工具调用成功
+2026-07-17 23:14:02,728 - agent - INFO - middleware.py:43 - [tool monitor]传入的参数：{}
+2026-07-17 23:14:02,728 - agent - INFO - middleware.py:47 - [tool monitor] fill_context_for_report 工具调用成功
+2026-07-17 23:14:02,729 - agent - INFO - middleware.py:49 - [tool monitor] fill_context_for_report工具调用成功, context中report置位True
+2026-07-17 23:14:02,729 - agent - INFO - middleware.py:65 - [log_before_model]即将调用模型, 带有4条消息
+2026-07-17 23:14:02,729 - agent - DEBUG - middleware.py:66 - [log_before_model] ToolMessage | fill_context_for_report已调用
+2026-07-17 23:14:02,730 - agent - INFO - middleware.py:73 - [report_prompt_switch] is_report =  True
+2026-07-17 23:14:10,802 - agent - INFO - middleware.py:42 - [tool monitor]执行工具：get_current_month
+2026-07-17 23:14:10,802 - agent - INFO - middleware.py:43 - [tool monitor]传入的参数：{}
+2026-07-17 23:14:10,802 - agent - INFO - middleware.py:42 - [tool monitor]执行工具：fetch_external_data
+2026-07-17 23:14:10,802 - agent - INFO - middleware.py:47 - [tool monitor] get_current_month 工具调用成功
+2026-07-17 23:14:10,803 - agent - INFO - middleware.py:42 - [tool monitor]执行工具：get_user_id
+2026-07-17 23:14:10,803 - agent - INFO - middleware.py:43 - [tool monitor]传入的参数：{'user_id': '1002', 'month': '2025-06'}
+2026-07-17 23:14:10,803 - agent - INFO - middleware.py:42 - [tool monitor]执行工具：rag_summarize
+2026-07-17 23:14:10,803 - agent - INFO - middleware.py:43 - [tool monitor]传入的参数：{}
+2026-07-17 23:14:10,804 - agent - INFO - middleware.py:43 - [tool monitor]传入的参数：{'query': '北京地区扫地机器人保养指南'}
+2026-07-17 23:14:10,804 - agent - INFO - middleware.py:47 - [tool monitor] get_user_id 工具调用成功
+2026-07-17 23:14:10,805 - agent - INFO - middleware.py:47 - [tool monitor] fetch_external_data 工具调用成功
+2026-07-17 23:14:18,053 - agent - INFO - middleware.py:47 - [tool monitor] rag_summarize 工具调用成功
+2026-07-17 23:14:18,054 - agent - INFO - middleware.py:65 - [log_before_model]即将调用模型, 带有9条消息
+2026-07-17 23:14:18,054 - agent - DEBUG - middleware.py:66 - [log_before_model] ToolMessage | 北京地区扫地机器人保养建议包括：每周清洁滤网灰尘，每月用软毛刷清理滚刷缠绕物，避免在潮湿地面使用以防电机进水，使用原装电池延长续航，每季度检查底盘螺丝松紧及边刷磨损情况。
+2026-07-17 23:14:18,054 - agent - INFO - middleware.py:73 - [report_prompt_switch] is_report =  True

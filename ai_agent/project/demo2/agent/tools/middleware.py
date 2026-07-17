@@ -46,6 +46,7 @@ def monitor_tool(
         result = handler(request)
         logger.info(f"[tool monitor] {request.tool_call['name']} 工具调用成功")
         if request.tool_call['name'] == "fill_context_for_report":
+            logger.info(f"[tool monitor] fill_context_for_report工具调用成功, context中report置位True")
             request.runtime.context['report'] = True
 
         return result
