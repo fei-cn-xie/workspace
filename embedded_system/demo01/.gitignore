@@ -1,4 +1,4 @@
 Objects/ # 编译生成的目标文件
 Listings/ # 编译列表文件
-*.uvgui.*
+*.uvgui.* # IDE 生成的 GUI 相关文件
 *.uvopt # IDE 配置选项文件
