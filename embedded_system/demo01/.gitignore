@@ -6,3 +6,4 @@ Listings/
 *.uvgui.*
 # IDE 配置选项文件
 *.uvopt
+tom.c
