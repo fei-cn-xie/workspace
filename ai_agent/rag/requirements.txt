@@ -1,7 +1,0 @@
-langchain
-langchain-community
-langchain-ollama
-dashscope
-chromadb
-jq
-langchain_chroma
