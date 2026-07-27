@@ -1,0 +1,8 @@
+# 编译生成的目标文件
+**/Objects/
+# 编译列表文件
+**/Listings/
+# IDE 生成的 GUI 相关文件
+**/*.uvgui.*
+# IDE 配置选项文件
+**/*.uvopt

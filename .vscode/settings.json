@@ -1,3 +1,4 @@
 {
-    "cmake.sourceDirectory": "D:/Users/fei/workspace/code_basic/sdl_learn/lib/SDL-release-2.28.3/android-project/app/jni/src"
+    "cmake.sourceDirectory": "D:/Users/fei/workspace/code_basic/sdl_learn/lib/SDL-release-2.28.3/android-project/app/jni/src",
+    "editor.editContext": false
 }
