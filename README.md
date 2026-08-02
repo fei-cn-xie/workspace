@@ -19,3 +19,10 @@
 #### 3. 推理 Inference
 推理阶段是模型的实际应用，此时模型参数固定，根据输入生成输出。
 > 这一阶段的优化重点从"学习能力“转向"响应速度“和”计算效率“。
+
+
+## Hugging Face
+> https://huggingface.co/
+
+![alt text](README/image-2.png)
+
