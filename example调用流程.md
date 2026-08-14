@@ -95,6 +95,108 @@ flowchart TD
 3. `__post_init__` 会执行一系列校验与归一化（例如 `temperature` 过小时强制 greedy、`stop` 字符串转列表等）。
 4. `sampling_type` 是一个 `@cached_property`：因为 `temperature=0.8 >= 1e-5` 且未设 `seed`，最终返回 `SamplingType.RANDOM`（随机采样）。这个值稍后在 GPU 采样阶段会被使用。
 
+### 2.1 `SamplingParams` 全部字段默认值（源码逐字段）
+
+**文件**：`vllm/sampling_params.py`
+
+`SamplingParams` 遵循 OpenAI 文本补全 API 的采样参数设计，并额外支持 beam search。全部字段及默认值如下：
+
+| 字段 | 默认值 | 含义 |
+|------|--------|------|
+| `n` | `1` | 每个 prompt 生成几条输出 |
+| `best_of` | `None` | 生成 `best_of` 条后挑 top `n` 条（仅 V0 支持） |
+| `presence_penalty` | `0.0` | 惩罚"是否出现过"，>0 鼓励新词（范围 [-2,2]） |
+| `frequency_penalty` | `0.0` | 按出现频率惩罚，>0 抑制重复（范围 [-2,2]） |
+| `repetition_penalty` | `1.0` | 复读惩罚，>1 抑制重复，<1 鼓励 |
+| `temperature` | `1.0` | 随机性控制，0=greedy，越大越随机 |
+| `top_p` | `1.0` | 核采样，累计概率截断，范围 (0,1] |
+| `top_k` | `0` | 只保留概率最高的 k 个（0=不限制） |
+| `min_p` | `0.0` | 相对最大概率的最小概率阈值，范围 [0,1] |
+| `seed` | `None` | 随机种子（设了就进入 `RANDOM_SEED` 可复现模式） |
+| `stop` | `None` | 停止字符串（命中即停，不出现在输出） |
+| `stop_token_ids` | `None` | 停止 token id 列表（命中即停，保留在输出） |
+| `ignore_eos` | `False` | 是否忽略 EOS 继续生成 |
+| `max_tokens` | `16` | 单条输出最大 token 数 |
+| `min_tokens` | `0` | 生成多少 token 后才允许命中 EOS |
+| `logprobs` | `None` | 每个输出 token 返回多少 top 概率 |
+| `prompt_logprobs` | `None` | 每个 prompt token 返回多少 top 概率 |
+| `detokenize` | `True` | 是否把 token 转回文本 |
+| `skip_special_tokens` | `True` | 输出时跳过特殊 token |
+| `spaces_between_special_tokens` | `True` | 特殊 token 之间是否加空格 |
+| `logits_processors` | `None` | 自定义 logits 处理器 |
+| `include_stop_str_in_output` | `False` | 停止串是否保留在输出 |
+| `truncate_prompt_tokens` | `None` | prompt 左截断（-1 用模型支持值，k 只留最后 k 个） |
+| `output_kind` | `CUMULATIVE` | 输出模式（累积/增量/仅最终） |
+| `structured_outputs` | `None` | 结构化输出约束（见 §32） |
+| `logit_bias` | `None` | 对特定 token id 加偏置（-100~100） |
+| `allowed_token_ids` | `None` | token 白名单 |
+| `extra_args` | `None` | 传给自定义采样实现的额外参数 |
+| `bad_words` | `None` | 禁止生成的词 |
+
+> 📌 **关于表格里出现的「V0 / V1」**：
+>
+> vLLM 有两代推理引擎架构，用环境变量 `VLLM_USE_V1` 切换：
+>
+> | | V0 引擎（旧） | V1 引擎（新，0.11 默认） |
+> |---|---|---|
+> | 调度模型 | 显式区分 prefill / decode 两阶段 | **统一模型**（`num_computed_tokens` 追 `num_tokens_with_spec`） |
+> | 代码位置 | `vllm/engine/`、`vllm/core/` | `vllm/v1/engine/`、`vllm/v1/core/` |
+> | 状态 | 遗留/兼容保留 | 当前默认，持续演进 |
+>
+> 所以 **`best_of` 这个参数只在 V0 引擎里有效**：它表示"内部生成 `best_of` 条候选，再从中挑出得分最高的 `n` 条返回"（一种"多生成几条再择优"的采样策略，会消耗更多显存和算力）。
+> 在 V1 引擎里 `best_of` **尚未支持**（V1 的 `Processor._validate_supported_sampling_params` 里会显式报错 `"vLLM V1 does not yet support best_of."`）。由于本机 vLLM 0.11.0 默认走 V1，所以本例中**不涉及 `best_of` 功能**。
+>
+> 关于 V0 与 V1 的完整差异，详见本文 §34。
+
+### 2.2 `__post_init__` 具体做了哪些处理（源码逐条）
+
+**文件**：`vllm/sampling_params.py` 的 `__post_init__`
+
+```mermaid
+flowchart TD
+    A["__post_init__()"] --> B["① best_of 处理:<br/>best_of 未设→默认 n<br/>best_of<n 报错<br/>设了 best_of 则 n=best_of"]
+    B --> C["② temperature 过小校正:<br/>0<temp<1e-2 时<br/>钳到 1e-2, 并警告"]
+    C --> D["③ seed==-1 转为 None"]
+    D --> E["④ stop 归一化:<br/>None→[]<br/>str→[str]"]
+    E --> F["⑤ stop_token_ids 归一化:<br/>None→[]"]
+    F --> G["⑥ bad_words 归一化:<br/>None→[]"]
+    G --> H["⑦ logprobs/prompt_logprobs<br/>为 True 时→1"]
+    H --> I["⑧ 计算 output_text_buffer_length<br/>(停止串评估预留字符数)"]
+    I --> J["⑨ _verify_args() 全部合法性校验"]
+    J --> K["⑩ temperature < 1e-5?<br/>强制 greedy: top_p=1.0, top_k=0, min_p=0.0"]
+    K --> L["⑪ 把 stop_token_ids 并入 _all_stop_token_ids"]
+    L --> M["⑫ guided_decoding 兼容:<br/>若设了则转成 structured_outputs"]
+```
+
+**`_verify_args()` 的关键校验**（`_verify_args` 方法）：
+- `n` 必须是 int 且 ≥1；
+- `best_of` 必须 ≥1 且 ≥ n；
+- `presence_penalty` / `frequency_penalty` 必须在 [-2, 2]；
+- `repetition_penalty` 必须 >0；
+- `temperature` 必须 ≥0；
+- `top_p` 必须在 (0, 1]；
+- `top_k` 必须是 int 且 ≥ -1（-1 视为禁用）；
+- `min_p` 必须在 [0, 1]；
+- `max_tokens` 必须 ≥1；`min_tokens` 必须 ≥0 且 ≤ max_tokens；
+- `logprobs` / `prompt_logprobs` 必须 ≥0 或 = -1；
+- `stop` 不能含空字符串；`stop_token_ids` 必须全为 int。
+
+### 2.3 本例 `SamplingParams(temperature=0.8, top_p=0.95)` 的实际取值
+
+构造后，这个对象的关键状态：
+
+| 字段 | 本例取值 | 说明 |
+|------|---------|------|
+| `temperature` | `0.8` | 显式传入 |
+| `top_p` | `0.95` | 显式传入 |
+| `n` | `1` | 默认 |
+| `max_tokens` | `16` | 默认 |
+| `repetition_penalty` | `1.0` | 默认（不惩罚） |
+| `stop` | `[]` | `__post_init__` 里 None→[] |
+| `stop_token_ids` | `[]` | `__post_init__` 里 None→[] |
+| `output_kind` | `CUMULATIVE` | 默认（但 §4.1 里会被 `LLM.generate` 强制改成 `FINAL_ONLY`） |
+| `sampling_type` | `RANDOM` | `temperature=0.8 ≥ 1e-5` 且未设 seed |
+
 > 小结：这一阶段只是构造了一个纯数据对象（采样配置），**没有做任何模型或硬件相关的事**。
 
 ---
@@ -139,6 +241,122 @@ flowchart TD
 ```
 
 核心动作：把 `LLM` 的构造参数**转译**成一个 `EngineArgs` 对象，然后交给 `LLMEngine.from_engine_args` 去真正创建引擎。
+
+#### 3.1.1 `LLM.__init__` 全部参数默认值（源码逐字段）
+
+**文件**：`vllm/entrypoints/llm.py` 的 `__init__` 签名
+
+`LLM` 的构造参数可分为「必填」「离线推理相关」「传递给 EngineArgs 的转译参数」三类。全部参数及默认值：
+
+| 参数 | 默认值 | 含义 |
+|------|--------|------|
+| `model` | （必填） | HuggingFace 模型名或本地路径 |
+| `runner` | `"auto"` | 模型运行器类型（generate/pooling 等） |
+| `convert` | `"auto"` | 模型转换（适配器）方式 |
+| `tokenizer` | `None` | 分词器名/路径（默认用 model 名） |
+| `tokenizer_mode` | `"auto"` | tokenizer 模式（auto/slow/mistral/custom） |
+| `skip_tokenizer_init` | `False` | 是否跳过 tokenizer 初始化 |
+| `trust_remote_code` | `False` | 是否信任 HF 远程代码 |
+| `allowed_local_media_path` | `""` | 允许读取的本地媒体目录 |
+| `allowed_media_domains` | `None` | 允许的多模态媒体域名 |
+| `tensor_parallel_size` | `1` | 张量并行卡数（§31） |
+| `dtype` | `"auto"` | 权重/激活精度（auto/half/bfloat16/float32 等） |
+| `quantization` | `None` | 量化方法（§29，None=从模型 config 推断） |
+| `revision` | `None` | 模型版本（分支/标签/commit） |
+| `tokenizer_revision` | `None` | tokenizer 版本 |
+| `seed` | `None` | 采样随机种子 |
+| `gpu_memory_utilization` | `0.9` | 给 KV cache 预留的显存比例（§12） |
+| `swap_space` | `4` | 每卡 CPU swap 空间（GiB） |
+| `cpu_offload_gb` | `0` | CPU 卸载大小（GiB，0=不卸载） |
+| `enforce_eager` | `False` | 是否强制 eager（禁用 CUDA graph） |
+| `disable_custom_all_reduce` | `False` | 禁用自定义 all-reduce（回退 NCCL） |
+| `hf_token` | `None` | HF 下载 token |
+| `hf_overrides` | `None` | 覆盖 HF config 的参数 |
+| `mm_processor_kwargs` | `None` | 多模态处理器覆盖参数 |
+| `pooler_config` | `None` | 池化模型配置 |
+| `structured_outputs_config` | `None` | 结构化输出全局配置 |
+| `kv_cache_memory_bytes` | `None` | 手动指定 KV cache 大小（跳过 profiling） |
+| `compilation_config` | `None` | 编译优化配置 |
+| `logits_processors` | `None` | 自定义 logits 处理器类型 |
+| `**kwargs` | — | 其余所有参数透传给 `EngineArgs` |
+
+**注意**：`LLM` 把上面这些参数「原样转译」进 `EngineArgs`（见 `__init__` 源码里 `engine_args = EngineArgs(model=model, runner=runner, ..., **kwargs)` 那一大段），所以 `LLM` 的参数默认值本质上是 `EngineArgs` 对应字段的默认值。
+
+#### 3.1.2 各子 Config 的默认值（真正的"配置来源"）
+
+`EngineArgs` 里几乎所有字段的默认值，都**引用自各 Config 类的类属性**（如 `EngineArgs.dtype = ModelConfig.dtype`）。因此真正的默认值定义在各 Config 类里：
+
+**① `ModelConfig`**（`vllm/config/model.py`）：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `model` | `"Qwen/Qwen3-0.6B"` | 占位默认（本例被 `opt-125m` 覆盖） |
+| `dtype` | `"auto"` | FP32/FP16 模型→FP16，BF16 模型→BF16 |
+| `seed` | `None` | 文档注明「V0 为 None，V1 初始化为 0」 |
+| `tokenizer_mode` | `"auto"` | 优先用 fast tokenizer |
+| `trust_remote_code` | `False` | |
+| `max_model_len` | `None` | 未指定时**从模型 config 自动推导** |
+| `quantization` | `None` | None 时先查模型 config 里的 `quantization_config` |
+| `enforce_eager` | `False` | 默认用 CUDA graph 混合 eager |
+| `max_logprobs` | `20` | 单 token 返回的 top 概率上限 |
+| `logprobs_mode` | `"raw_logprobs"` | logprobs 内容模式 |
+
+**② `CacheConfig`**（`vllm/config/cache.py`）：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `block_size` | `None` | **无静态默认**，由 `Platform.check_and_update_config()` 按平台设定（CUDA 最大 32） |
+| `gpu_memory_utilization` | `0.9` | KV cache 预留显存比例 |
+| `swap_space` | `4` | 每卡 CPU swap（GiB） |
+| `cache_dtype` | `"auto"` | KV cache 精度，auto=随模型 |
+| `enable_prefix_caching` | `None` | **V1 默认启用** |
+| `prefix_caching_hash_algo` | `"sha256"` | 前缀缓存 hash 算法 |
+| `cpu_offload_gb` | `0` | CPU 卸载 |
+
+**③ `SchedulerConfig`**（`vllm/config/scheduler.py`）：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `max_num_batched_tokens` | `None` | **无静态默认**，运行时按 usage context 设定 |
+| `max_num_seqs` | `None` | **无静态默认**，运行时设定 |
+| `max_num_partial_prefills` | `1` | chunked prefill 并发分块数 |
+| `max_long_partial_prefills` | `1` | 长 prompt 并发分块数 |
+| `long_prefill_token_threshold` | `0` | 长 prompt 判定阈值 |
+| `num_lookahead_slots` | `0` | 推测解码预留槽位 |
+| `policy` | `"fcfs"` | 调度策略（先来先服务） |
+| `enable_chunked_prefill` | `None` | **V1 默认 True** |
+
+**④ `ParallelConfig`**（`vllm/config/parallel.py`）：
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `pipeline_parallel_size` | `1` | 流水线并行段数 |
+| `tensor_parallel_size` | `1` | 张量并行卡数 |
+| `data_parallel_size` | `1` | 数据并行副本数 |
+| `data_parallel_backend` | `"mp"` | DP 后端（mp/ray） |
+| `enable_expert_parallel` | `False` | MoE 专家并行 |
+
+#### 3.1.3 本例 `LLM(model="facebook/opt-125m")` 实际得到的配置
+
+只传了 `model`，其余全默认。关键默认值的**实际落地结果**：
+
+| 配置项 | 本例实际值 | 来源 |
+|--------|-----------|------|
+| `model` | `facebook/opt-125m` | 显式传入 |
+| `dtype` | `auto` → 实际 **FP16** | OPT-125m 是 FP32/FP16 模型 |
+| `tensor_parallel_size` | `1` | 默认（单卡） |
+| `gpu_memory_utilization` | `0.9` | 默认 |
+| `block_size` | 平台决定（CUDA 上通常 16） | `Platform.check_and_update_config` |
+| `enable_prefix_caching` | `True` | V1 默认启用 |
+| `enable_chunked_prefill` | `True` | V1 默认启用 |
+| `max_num_seqs` | 运行时按 usage context 设定 | 离线 LLM 默认值 |
+| `max_model_len` | 从 OPT-125m config 推导（2048） | 模型 config |
+| `quantization` | `None`（无量化） | 默认 |
+| `enforce_eager` | `False`（用 CUDA graph） | 默认 |
+| `seed` | V1 初始化为 `0` | ModelConfig 文档注明 |
+| 引擎版本 | **V1** | `_is_v1_supported_oracle` 判定 |
+
+> 要点：**`dtype="auto"` 是"惰性推导"而非固定值**——它会读模型的 HF config 里的 `torch_dtype`，FP32/FP16 模型统一用 FP16（省一半显存），BF16 模型用 BF16。同理 `max_model_len`、`block_size`、`max_num_seqs` 都是"运行时推导/平台决定"的，这解释了为什么 `EngineArgs` 里它们默认是 `None`。
 
 ---
 
@@ -2191,3 +2409,449 @@ flowchart LR
 6. **源码级实现细节**（block 引用计数复用 / 昇腾 OOT 插件）。
 
 所有内容均基于本机 vLLM 0.11.0 真实源码，并标注了文件路径，可随时对照精读。
+
+---
+
+# 第八部分：任务谱系、多模态、分布式与生产实践
+
+> 这一部分补齐文档此前未覆盖的核心内容：多模态（VLM）、Pooling 任务族、
+> 分布式通信底层、前缀缓存深入、EngineCore 多进程架构、以及生产环境必备的监控与加载优化。
+
+---
+
+## 38. 任务谱系：Generate vs Pooling
+
+**文件**：`vllm/tasks.py`
+
+vLLM 并不是只能做"文本生成"。它支持**两大任务族**，通过 `runner_type` 分叉：
+
+```python
+# vllm/tasks.py
+GenerationTask = Literal["generate", "transcription"]
+PoolingTask = Literal["encode", "embed", "classify", "score"]
+SupportedTask = Literal[GenerationTask, PoolingTask]
+```
+
+```mermaid
+flowchart TD
+    A["SupportedTask"] --> B["GenerationTask 生成类"]
+    A --> C["PoolingTask 池化类"]
+    B --> B1["generate<br/>(文本生成, 本文主线)"]
+    B --> B2["transcription<br/>(语音转写)"]
+    C --> C1["encode / embed<br/>(Embedding 向量)"]
+    C --> C2["classify<br/>(分类)"]
+    C --> C3["score<br/>(打分/rerank)"]
+```
+
+### 38.1 两大任务族的本质区别
+
+| 维度 | Generate（生成） | Pooling（池化） |
+|------|-----------------|----------------|
+| 输出 | 逐 token 自回归生成文本 | 把整段输入"压"成一个向量/分数 |
+| 参数对象 | `SamplingParams` | `PoolingParams` |
+| 典型模型 | LLM（OPT/Llama/Qwen） | BERT、embedding 模型、rerank 模型 |
+| 典型接口 | `/v1/chat/completions` | `/v1/embeddings`、`/v1/rerank` |
+
+### 38.2 `PoolingParams` 结构
+
+**文件**：`vllm/pooling_params.py`
+
+```python
+class PoolingParams(msgspec.Struct, ...):
+    truncate_prompt_tokens: Optional[int] = None   # prompt 截断
+    # embedding 专用
+    dimensions: Optional[int] = None               # Matryoshka 降维
+    normalize: Optional[bool] = None               # 是否归一化
+    # classification / scoring / rerank 专用
+    activation: Optional[bool] = None              # 是否加激活函数
+    # reward 模型专用
+    softmax: Optional[bool] = None                 # 是否 softmax
+    task: Optional[PoolingTask] = None             # 内部使用
+```
+
+**关键理解**：Pooling 模型不做自回归，而是走一遍 encoder/前向，把最后一层 hidden state 经过 pooling（mean/cls 等）得到一个固定维度的向量。`PoolingParams` 控制这个"如何 pooling"。
+
+### 38.3 任务如何分叉
+
+回忆 §3.2：`ModelConfig.runner_type` 决定走哪条路。`LLM.generate()` 里就有一句校验：
+
+```python
+if runner_type != "generate":
+    raise ValueError("LLM.generate() is only supported for generative models.")
+```
+
+所以离线 `LLM` 类里，`generate()` 只服务生成任务；embedding 走 `llm.embed()`，分类走 `llm.classify()`，打分走 `llm.score()`。
+
+---
+
+## 39. 多模态（VLM）—— 视觉语言模型
+
+**目录**：`vllm/multimodal/`
+
+### 39.1 支持的数据模态
+
+`multimodal/` 目录按模态分文件：
+
+| 文件 | 模态 |
+|------|------|
+| `image.py` | 图片 |
+| `video.py` | 视频 |
+| `audio.py` | 音频 |
+| `evs.py` | 事件视觉传感器（event vision sensor） |
+
+### 39.2 核心抽象：`MultiModalRegistry`
+
+**文件**：`vllm/multimodal/registry.py`
+
+```python
+class MultiModalRegistry:
+    """A registry that dispatches data processing according to the model."""
+```
+
+它根据**模型架构**分发到对应的多模态处理器。关键方法：
+- `supports_multimodal_inputs()`：判断模型是否真的支持多模态（所有模态 limit 都为 0 则退回 text-only）；
+- `create_processor()`：为当前模型创建多模态处理器。
+
+### 39.3 处理链：从原始输入到模型张量
+
+**文件**：`vllm/multimodal/processing.py`
+
+```mermaid
+flowchart TD
+    A["输入: 文本 + 图片"] --> B["MultiModalProcessor.apply()"]
+    B --> C["视觉 encoder 处理图片<br/>→ 视觉 embedding"]
+    C --> D["把图片 embedding 插入文本 token 序列<br/>(mm_placeholders 占位)"]
+    D --> E["得到 prompt_token_ids + mm_features"]
+    E --> F["mm_features 传给模型<br/>(视觉 token + 文本 token 一起前向)"]
+```
+
+关键数据结构（回忆 §4.2 的 `Processor.process_inputs`）：
+
+```python
+mm_features: Optional[list[MultiModalFeatureSpec]] = None
+# 每个 MultiModalFeatureSpec 包含:
+#   data      视觉 embedding 数据
+#   modality  模态(image/video/audio)
+#   identifier hash(用于缓存)
+#   mm_position 在序列中的位置
+```
+
+### 39.4 多模态缓存（mm_processor_cache）
+
+视觉 encoder 处理图片很慢（对同一张图重复处理浪费）。vLLM 用 **mm_processor_cache** 缓存处理结果：
+
+- 相同图片（按 hash）只处理一次；
+- 缓存大小由 `mm_processor_cache_gb` 控制；
+- `mm_uuids` 用于标识多模态数据项，避免重复 hash。
+
+对应源码：`vllm/multimodal/cache.py`、`EngineCore.__init__` 里的 `mm_receiver_cache`。
+
+### 39.5 多模态的显存 profiling
+
+`MultiModalProfiler`（`vllm/multimodal/profiling.py`）专门测算视觉 encoder 的 token 占用，因为视觉输入会占用大量 token（一张图可能对应几百到上千个视觉 token）。
+
+---
+
+## 40. 分布式通信底层 —— TP/PP 的根基
+
+**目录**：`vllm/distributed/`
+
+前面 §31 讲了 TP/PP 的"切分思想"，这里深入"切分之后如何通信"。
+
+### 40.1 通信组管理：`GroupCoordinator` 与 `parallel_state`
+
+**文件**：`vllm/distributed/parallel_state.py`
+
+vLLM 抽象了一个 `GroupCoordinator` 类，统一管理各种**通信组（process group）**：
+
+```mermaid
+flowchart TD
+    A["initialize_model_parallel()"] --> B["init_model_parallel_group()"]
+    B --> C["创建 TP 组 (tensor parallel)"]
+    B --> D["创建 PP 组 (pipeline parallel)"]
+    B --> E["创建 DP 组 (data parallel)"]
+    B --> F["创建 world 组 (全局)"]
+    C --> G["GroupCoordinator<br/>封装 all_reduce/all_gather/broadcast"]
+    D --> G
+    E --> G
+```
+
+每个通信组就是一个 `GroupCoordinator`，提供统一的集合通信接口。
+
+### 40.2 集合通信原语
+
+**文件**：`vllm/distributed/communication_op.py`
+
+这是 TP 计算的核心，几个关键原语：
+
+```python
+def tensor_model_parallel_all_reduce(input_):   # TP 组内 all-reduce（求和）
+    return get_tp_group().all_reduce(input_)
+
+def tensor_model_parallel_all_gather(input_, dim=-1):  # TP 组内 all-gather（拼接）
+    return get_tp_group().all_gather(input_, dim)
+
+def tensor_model_parallel_reduce_scatter(input_, dim=-1):  # reduce-scatter
+    return get_tp_group().reduce_scatter(input_, dim)
+```
+
+这些原语对应 §31 里 `ColumnParallelLinear`（需要 all-reduce 汇总）和 `RowParallelLinear`（需要 all-gather 拆分）的通信需求。
+
+### 40.3 custom_all_reduce —— 性能优化的关键
+
+**关键优化点**：默认的 `torch.distributed.all_reduce` 走 NCCL，但在**单机多卡 + NVLink** 场景下，NCCL 的通用实现并非最优。vLLM 提供了一个 **custom all-reduce kernel**：
+
+- 针对小张量（TP 通信通常是小张量）优化；
+- 用 `disable_custom_all_reduce=False`（默认）启用，回退到 NCCL 用 `True`；
+- 显著降低 TP 通信延迟，提升多卡吞吐。
+
+对应源码：`vllm/distributed/device_communicators/`（自定义通信 kernel）。
+
+---
+
+## 41. 前缀缓存深入 —— 从 hash 到命中
+
+前面 §8.4/§22 讲了前缀缓存的概念和引用计数，这里补充**完整的命中/驱逐数据流**。
+
+### 41.1 数据结构回顾（`block_pool.py`）
+
+**文件**：`vllm/v1/core/block_pool.py`
+
+```mermaid
+flowchart LR
+    A["BlockPool"] --> B["cached_block_hash_to_block:<br/>BlockHashToBlockMap"]
+    B --> C["hash → KVCacheBlock<br/>(或多个 block)"]
+    A --> D["free_block_queue:<br/>LRU 双向链表"]
+```
+
+`BlockHashToBlockMap` 内部是 `dict[BlockHashWithGroupId, KVCacheBlock 或 dict]`：
+- 一个 hash 通常映射到**单个 block**；
+- 多个 block 有相同 hash 时，映射到 **dict**（`block_id → block`）。
+
+### 41.2 hash 算法
+
+**文件**：`vllm/config/cache.py` 的 `prefix_caching_hash_algo`：
+
+| 算法 | 说明 |
+|------|------|
+| `sha256`（默认） | Pickle 序列化后 SHA-256 |
+| `sha256_cbor` | 用规范化 CBOR 序列化后 SHA-256，**跨语言可复现** |
+
+### 41.3 完整命中流程
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant S as Scheduler
+    participant M as KVCacheManager
+    participant P as BlockPool
+    participant H as BlockHashToBlockMap
+
+    S->>M: allocate_slots(req, ...)
+    M->>P: get_cached_block(hash)
+    P->>H: 查 hash → 命中 block
+    alt 命中 (cache hit)
+        H-->>P: 返回 block
+        P->>P: touch(block)  ref_cnt+1
+        P-->>M: 返回 block（跳过 prefill）
+    else 未命中 (cache miss)
+        P->>P: get_new_blocks() 从自由池取新块
+        P-->>M: 返回新块（需 prefill）
+        M->>P: cache_full_blocks() 满块后打 hash 入缓存
+    end
+```
+
+### 41.4 驱逐流程
+
+**文件**：`block_pool.py` 的 `get_new_blocks` / `_maybe_evict_cached_block`：
+
+当自由池耗尽，要取一个"曾经被缓存过"的块时：
+
+1. `get_new_blocks` 从 `free_block_queue`（LRU）取块；
+2. 若这个块有 hash，调用 `_maybe_evict_cached_block`；
+3. 从 `cached_block_hash_to_block` 摘除该块，`reset_hash()`；
+4. 该块变回纯空闲块，分配给新请求。
+
+**关键结论**：前缀缓存的块是"LRU 驱逐"的——被缓存但长期没被命中的块，最终会被当作普通空闲块复用。这就是 `FreeKVCacheBlockQueue` 用 LRU 顺序的原因（§22.2）。
+
+---
+
+## 42. EngineCore 多进程架构 —— 前后端解耦
+
+前面 §27 提到在线引擎用 ZMQ + 多进程，这里展开。
+
+### 42.1 三种 Client 模式
+
+**文件**：`vllm/v1/engine/core_client.py`
+
+`EngineCoreClient.make_client` 根据 `multiprocess_mode` 和 `asyncio_mode` 分派：
+
+```mermaid
+flowchart TD
+    A["make_client()"] --> B{"multiprocess_mode?"}
+    B -->|"False"| C["InprocClient<br/>进程内, 离线 LLM 用"]
+    B -->|"True + sync"| D["SyncMPClient<br/>ZMQ + 后台进程 + 线程"]
+    B -->|"True + async"| E["AsyncMPClient<br/>ZMQ + 后台进程 + asyncio"]
+```
+
+| Client | 适用 | 通信 |
+|--------|------|------|
+| `InprocClient` | 离线 `LLM`（§3.4） | 进程内直接调用 |
+| `SyncMPClient` | 在线同步场景 | ZMQ 多部分消息 + 后台线程 |
+| `AsyncMPClient` | 在线 `AsyncLLM`（§27） | ZMQ + asyncio |
+
+### 42.2 序列化与传输
+
+**文件**：`vllm/v1/serial_utils.py`
+
+跨进程传输 `EngineCoreRequest` / `EngineCoreOutputs` 用 **msgpack**（`MsgpackEncoder` / `MsgpackDecoder`），比 pickle 更快更安全。
+
+**关键细节**（`SyncMPClient._send_input`）：
+
+```python
+msg = (self.core_engine, request_type.value, *self.encoder.encode(request))
+self.input_socket.send_multipart(msg, copy=False, track=True)
+```
+
+- **copy=False + track=True**：ZMQ 零拷贝发送，用 `MessageTracker` 追踪张量缓冲区的生命周期，避免发送期间被释放；
+- 这就是 §27 里 `output_handler` 后台循环拉取输出的底层机制。
+
+### 42.3 进程模型
+
+```mermaid
+flowchart LR
+    A["API Server 进程<br/>(FastAPI)"] -->|"ZMQ (input socket)"| B["EngineCore 进程<br/>(真正跑模型)"]
+    B -->|"ZMQ (output socket)"| A
+    A --> C["output_queue_thread<br/>(后台线程收输出)"]
+```
+
+**好处**：API Server（前端）和 EngineCore（核心）分离，EngineCore 崩了不会拖垮 API 进程，可以独立重启；也支持 DP 多进程（`CoreEngineProcManager` / `CoreEngineActorManager` 管理多个引擎进程）。
+
+---
+
+## 43. 生产实践：监控指标与模型加载优化
+
+### 43.1 监控指标（Metrics）
+
+**文件**：`vllm/v1/metrics/loggers.py`、`vllm/v1/metrics/stats.py`
+
+vLLM 内置 Prometheus 指标，通过 `/metrics` 端点暴露（§26 的 `mount_metrics`）：
+
+| 指标类别 | 典型指标 |
+|---------|---------|
+| **吞吐** | 每秒处理的 prompt token / output token 数 |
+| **延迟** | TTFT（首 token 延迟）、TPOT（每 token 延迟） |
+| **并发** | 运行中的请求数、等待中的请求数 |
+| **KV cache** | KV cache 使用率 |
+| **调度** | 抢占次数、排队长度 |
+
+`StatLoggerManager`（`loggers.py`）负责统一收集和分发这些统计，`IterationStats`（`stats.py`）是每轮 step 的统计快照。
+
+### 43.2 模型加载优化
+
+加载大模型很慢，vLLM 提供多种加速：
+
+| 技术 | 文件 | 说明 |
+|------|------|------|
+| **并行加载** | `ParallelConfig.max_parallel_loading_workers` | 多进程并行加载分片，减少内存峰值 |
+| **Tensorizer** | `model_loader/tensorizer_loader.py` | 直接加载预序列化的张量，跳过 HF 慢解析 |
+| **Sharded State** | `save_sharded_state` / `load` | 保存/加载分布式分片状态 |
+| **bitsandbytes 加载时量化** | `quantization/bitsandbytes.py` | 边加载边量化，省显存 |
+
+### 43.3 长上下文技术（进阶）
+
+| 技术 | 说明 |
+|------|------|
+| **sliding window** | 只保留最近 N 个 token 的 KV（`disable_sliding_window` 控制） |
+| **cascade attention** | V1 的多级注意力优化（`disable_cascade_attn` 控制） |
+| **稀疏注意力** | 跳过不重要的 KV 位置 |
+
+### 43.4 睡眠模式（Sleep Mode）
+
+**文件**：`vllm/device_allocator/cumem.py`、`gpu_worker.py` 的 `sleep` 方法
+
+vLLM 支持把模型权重**卸载到 CPU 内存**（sleep），需要时再加载回来（wake up），用于节省显存：
+
+```mermaid
+flowchart LR
+    A["sleep(level=1)"] --> B["权重卸载到 CPU<br/>释放显存"]
+    B --> C["wake_up()"]
+    C --> D["权重重新加载到 GPU"]
+```
+
+`is_sleep_mode_available()` 目前仅 CUDA 支持（§14 平台接口表）。这对"多个模型共享一张卡、按需唤醒"的场景很有用。
+
+---
+
+## 44. 最终全景图（七大部分整合）
+
+> 说明：只有「基础链路」内部的 **实线箭头（`-->`）** 表示真正的运行时顺序；
+> 其余板块用 **虚线箭头（`-.->`）** 表示「作用于」基础链路的某个阶段，并非运行步骤。
+
+```mermaid
+flowchart TD
+    subgraph 主干["基础链路 · 真实运行顺序（实线）"]
+        direction LR
+        A1["① 调用入口<br/>LLM / vllm serve"] --> A2["② 引擎初始化<br/>加载模型 + KV cache"] --> A3["③ 调度推理<br/>schedule→forward→sample"] --> A4["④ 结果输出<br/>RequestOutput / SSE"]
+    end
+
+    subgraph 任务谱系["任务谱系（决定入口走哪条路）"]
+        direction LR
+        T1["Generate 文本生成"]
+        T2["Pooling embed/score"]
+        T3["多模态 VLM"]
+    end
+    subgraph 核心技术["核心技术（作用于推理）"]
+        direction LR
+        B1["PagedAttention"]
+        B2["Continuous Batching"]
+        B3["CUDA Graph"]
+        B4["硬件抽象"]
+    end
+    subgraph 性能优化["性能优化（作用于初始化 + 推理）"]
+        direction LR
+        C1["量化"]
+        C2["推测解码"]
+        C3["并行 TP/PP/DP/EP"]
+        C4["前缀缓存"]
+    end
+    subgraph 功能与架构["功能与架构（作用于初始化 + 输出）"]
+        direction LR
+        D1["结构化输出"]
+        D2["LoRA"]
+        D3["V0 vs V1"]
+        D4["PD 分离"]
+        D5["EngineCore 多进程"]
+    end
+    subgraph 生产实践["生产实践（作用于初始化 + 推理）"]
+        direction LR
+        E1["监控 Metrics"]
+        E2["加载优化"]
+        E3["睡眠模式"]
+    end
+
+    任务谱系 -.->|决定入口| A1
+    核心技术 -.->|优化推理| A3
+    性能优化 -.->|量化/并行| A2
+    性能优化 -.->|推测/前缀| A3
+    功能与架构 -.->|LoRA/PD/多进程| A2
+    功能与架构 -.->|结构化输出| A4
+    生产实践 -.->|加载/睡眠| A2
+    生产实践 -.->|监控| A3
+```
+
+---
+
+## 45. 完整学习路线（最终版）
+
+```mermaid
+flowchart LR
+    A["① 跑通<br/>离线 LLM + 在线 serve"] --> B["② 读懂<br/>PagedAttention + 调度"]
+    B --> C["③ 任务谱系<br/>generate / pooling / 多模态"]
+    C --> D["④ 优化<br/>量化 + 推测解码 + 并行"]
+    D --> E["⑤ 性能细节<br/>前缀缓存 + 分布式通信"]
+    E --> F["⑥ 架构<br/>V1 + EngineCore 多进程 + PD 分离"]
+    F --> G["⑦ 生产<br/>监控 + 加载优化 + 云上部署"]
+```
+
+这份文档到此已覆盖 vLLM 的**完整知识体系**，从调用入口到引擎内核、从任务谱系到硬件适配、从性能优化到生产实践，全部基于本机 vLLM 0.11.0 真实源码。
