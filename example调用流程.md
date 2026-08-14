@@ -1485,3 +1485,709 @@ flowchart TD
 至此，你已经掌握了 vLLM 从「调用入口 → 引擎初始化 → 调度推理 → 采样输出」的完整链路，
 以及「PagedAttention 分页机制」「连续批处理」「CUDA Graph」「硬件抽象层」四大核心技术。
 建议对照本机 `.venv/Lib/site-packages/vllm/` 源码，按本文标注的文件路径逐段精读。
+
+---
+
+# 第五部分：在线服务（vllm serve → OpenAI 兼容 API → AsyncLLM）
+
+> 你的 `example.py` 用的是**离线 `LLM`**（`llm.generate`，一次性批量推理）。
+> 但工作中绝大多数场景是**在线服务**：`vllm serve` 起一个 HTTP 服务，客户端像调 OpenAI 一样调它。
+> 本部分把这条链路完整讲透。
+
+---
+
+## 25. 离线 vs 在线：两条完全不同的引擎
+
+| 维度 | 离线（Offline） | 在线（Online） |
+|------|----------------|---------------|
+| 入口类 | `LLM`（`entrypoints/llm.py`） | `AsyncLLM`（`v1/engine/async_llm.py`） |
+| 调用方式 | `llm.generate(prompts, params)` 一次性提交 | 每个 HTTP 请求单独提交，流式返回 |
+| 引擎核心 | `InprocClient`（进程内同步） | `AsyncMPClient`（异步多进程 + ZMQ） |
+| 结果返回 | 全部算完一次性返回 `list[RequestOutput]` | 逐步流式返回（SSE） |
+| 典型场景 | 批量评测、离线生成、数据处理 | `vllm serve`、线上 API 服务 |
+
+**关键差异**：离线用 `LLM.generate` 是**同步、批量、一次性**的；在线用 `AsyncLLM.generate` 是**异步、逐请求、流式**的，背后是独立的 `output_handler` 后台任务。
+
+---
+
+## 26. 启动：`vllm serve` 的完整装配
+
+**入口文件**：`vllm/entrypoints/openai/api_server.py`
+
+`vllm serve` 最终会调用 `build_app(args)` 构造一个 FastAPI 应用：
+
+```mermaid
+flowchart TD
+    A["vllm serve 命令行"] --> B["解析 CLI 参数 → Namespace"]
+    B --> C["创建 AsyncLLM 引擎<br/>(engine_client)"]
+    C --> D["build_app(args)"]
+    D --> E["FastAPI(lifespan=...)"]
+    E --> F["app.include_router(router)<br/>注册所有 OpenAI 兼容路由"]
+    E --> G["mount_metrics(app)<br/>挂 Prometheus 指标"]
+    E --> H["加 CORS 中间件"]
+    E --> I["加认证 / 请求ID 中间件"]
+    E --> J["ScalingMiddleware<br/>(弹性扩缩容感知)"]
+```
+
+**注册的所有路由**（`@router.post` 装饰的端点，源码里可见 28 个）：
+
+| 端点 | 用途 |
+|------|------|
+| `/v1/chat/completions` | Chat 补全（最常用） |
+| `/v1/completions` | 文本补全 |
+| `/v1/embeddings` | Embedding 向量 |
+| `/v1/responses` | OpenAI 新 Responses API |
+| `/v1/rerank` / `/v2/rerank` | 重排序 |
+| `/v1/audio/transcriptions` | 语音转写 |
+| `/pooling` / `/classify` / `/score` | 池化 / 分类 / 打分 |
+| `/v1/load_lora_adapter` | 动态加载 LoRA |
+| `/ping` / `/tokenize` / `/detokenize` | 工具端点 |
+
+---
+
+## 27. 一次 `/v1/chat/completions` 请求的完整生命周期
+
+### 27.1 第 1 层：HTTP 路由
+
+**文件**：`vllm/entrypoints/openai/api_server.py`
+
+```python
+@router.post("/v1/chat/completions", dependencies=[Depends(validate_json_request)])
+@with_cancellation
+@load_aware_call
+async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    handler = chat(raw_request)                                    # 拿到 OpenAIServingChat
+    generator = await handler.create_chat_completion(request, raw_request)
+    if isinstance(generator, ChatCompletionResponse):
+        return JSONResponse(content=generator.model_dump())        # 非流式
+    return StreamingResponse(content=generator, media_type="text/event-stream")  # 流式
+```
+
+装饰器说明：
+- `validate_json_request`：校验请求是合法 JSON；
+- `with_cancellation`：客户端断开时自动取消底层请求；
+- `load_aware_call`：负载感知（配合弹性扩缩容）。
+
+### 27.2 第 2 层：Chat 服务处理器
+
+**文件**：`vllm/entrypoints/openai/serving_chat.py`
+
+`OpenAIServingChat.create_chat_completion` 的核心工作：
+
+```mermaid
+flowchart TD
+    A["create_chat_completion()"] --> B["_check_model() 校验模型"]
+    B --> C["_maybe_get_adapters()<br/>解析 LoRA 适配器"]
+    C --> D["_preprocess_chat()<br/>★ 应用 chat template"]
+    D --> E["把 messages 渲染成 prompt 字符串<br/>+ 提取 tool calls"]
+    E --> F["构建 SamplingParams"]
+    F --> G["调用 engine_client.generate()<br/>(进入 AsyncLLM)"]
+```
+
+**关键：chat template（聊天模板）**——这是 chat 接口和纯文本补全的本质区别：
+
+```mermaid
+flowchart LR
+    A["messages:<br/>[{role:user, content:你好}]"] --> B["chat template<br/>(Jinja2 模板)"]
+    B --> C["渲染成 prompt:<br/>'<|user|>\\n你好\\n<|assistant|>\\n'"]
+```
+
+不同模型的模板不同（Qwen、Llama、ChatML 各有各的格式），vLLM 从模型的 `tokenizer_config.json` 里读取模板，把 `messages` 数组渲染成模型真正认识的 prompt 文本，再 tokenize。
+
+### 27.3 第 3 层：AsyncLLM 异步引擎
+
+**文件**：`vllm/v1/engine/async_llm.py`
+
+`AsyncLLM.generate` 是异步引擎的入口，它的结构是**生产者-消费者**模式：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant API as API Server
+    participant A as AsyncLLM.generate
+    participant Q as AsyncStream(队列)
+    participant H as output_handler(后台任务)
+    participant C as EngineCore(独立进程)
+
+    API->>A: generate(prompt, params, request_id)
+    A->>A: add_request() 处理输入 → EngineCoreRequest
+    A->>C: 提交请求到 EngineCore
+    A->>Q: 创建该请求的 AsyncStream 队列
+    Note over H,C: output_handler 在后台 while True 循环
+    H->>C: get_output_async() 拉取 EngineCore 输出
+    H->>H: process_outputs() detokenize
+    H->>Q: 把 RequestOutput 推入对应队列
+    loop 生成器循环
+        A->>Q: get_nowait() 取结果
+        A-->>API: yield RequestOutput(流式)
+    end
+```
+
+关键源码（`generate` 的 docstring 原文）：
+
+> 1) Making an AsyncStream corresponding to the Request.
+> 2) Processing the Input.
+> 3) Adding the Request to the Detokenizer.
+> 4) Adding the Request to the EngineCore (separate process).
+
+**核心机制拆解**：
+
+1. **每个请求一个 `AsyncStream` 队列**：请求和结果通过队列解耦，支持高并发。
+2. **`output_handler` 是唯一的后台消费者**：一个 `while True` 循环持续从 EngineCore 拉输出，detokenize 后按 `request_id` 分发到各请求的队列。
+3. **流式 vs 非流式**：
+   - 流式（`stream=true`）：每生成一个 token 就 `yield` 一个 `RequestOutput`，API Server 转成 SSE 发给客户端；
+   - 非流式：攒到最后一次性返回 `ChatCompletionResponse`。
+4. **客户端断开处理**：`generate` 捕获 `CancelledError` / `GeneratorExit`，自动 `abort(request_id)`，释放该请求占用的 KV cache。
+
+---
+
+## 28. 在线服务完整时序图（一图总结）
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 客户端
+    participant R as FastAPI Router
+    participant S as OpenAIServingChat
+    participant A as AsyncLLM
+    participant H as output_handler
+    participant C as EngineCore
+
+    U->>R: POST /v1/chat/completions
+    R->>S: create_chat_completion()
+    S->>S: 应用 chat template 渲染 prompt
+    S->>A: generate(prompt, params)
+    A->>C: 提交请求(独立进程)
+    A-->>S: 返回 AsyncGenerator
+    S-->>R: StreamingResponse(SSE)
+    R-->>U: 200 + text/event-stream
+
+    loop 生成中
+        H->>C: 拉 EngineCoreOutputs
+        H->>A: 推入请求队列
+        A-->>S: yield RequestOutput
+        S-->>R: SSE chunk
+        R-->>U: data: {...}
+    end
+
+    S-->>R: data: [DONE]
+    R-->>U: 结束
+```
+
+---
+
+# 第六部分：性能优化技术
+
+## 29. 量化（Quantization）—— 降显存的第一手段
+
+**目录**：`vllm/model_executor/layers/quantization/`
+
+### 29.1 为什么量化
+
+大模型权重默认是 **fp16/bf16（16 bit）**。量化把权重/激活降到更低的精度：
+
+| 精度 | 每参数 bit 数 | 7B 模型权重体积 |
+|------|--------------|----------------|
+| fp16/bf16 | 16 | ~14 GB |
+| **int8** | 8 | ~7 GB（减半） |
+| **int4**（AWQ/GPTQ） | 4 | ~3.5 GB（1/4） |
+| **fp8** | 8 | ~7 GB（减半，但保留浮点动态范围） |
+
+好处：**同样显存能跑更大模型 / 更高并发**，代价是**精度略降**。这是部署大模型的刚需。
+
+### 29.2 量化抽象：两大基类
+
+**文件**：`vllm/model_executor/layers/quantization/base_config.py`
+
+```mermaid
+flowchart TD
+    A["QuantizationConfig (抽象基类)"] --> B["get_name(): 量化方法名"]
+    A --> C["get_min_capability(): 最低GPU算力要求"]
+    A --> D["from_config(): 从HF配置解析"]
+    A --> E["get_supported_act_dtypes()"]
+    F["QuantizeMethodBase (抽象基类)"] --> G["create_weights(): 创建量化权重"]
+    F --> H["apply(): 前向时如何用权重计算"]
+    F --> I["process_weights_after_loading(): 加载后处理"]
+```
+
+- **`QuantizationConfig`**：描述"怎么配置"（解析模型里的量化配置）；
+- **`QuantizeMethodBase`**：描述"怎么计算"（每个线性层如何用量化权重做矩阵乘）。
+
+每个量化方法都同时实现这两个基类。
+
+### 29.3 vLLM 支持的量化方法
+
+**文件**：`vllm/model_executor/layers/quantization/__init__.py` 的 `method_to_config` 映射，**共 30 种**：
+
+| 类别 | 方法 | 说明 |
+|------|------|------|
+| **4-bit 权重量化** | `awq` / `awq_marlin` | AWQ（激活感知权重量化） |
+| | `gptq` / `gptq_marlin` / `gptq_marlin_24` / `gptq_bitblas` | GPTQ（基于海森矩阵的量化） |
+| | `bitsandbytes` | 8/4-bit，加载时量化 |
+| **8-bit 浮点** | `fp8` / `fbgemm_fp8` | FP8（保留浮点动态范围） |
+| | `modelopt` / `modelopt_fp4` | NVIDIA TensorRT-LLM ModelOpt |
+| | `ptpc_fp8` | PTPC FP8 |
+| **专家量化（MoE）** | `experts_int8` / `moe_wna16` | MoE 专家量化 |
+| **4-bit 浮点** | `mxfp4` / `petit_nvfp4` | MXFP4、Petit FP4 |
+| **压缩张量** | `compressed-tensors` | 统一压缩格式 |
+| **平台专属** | `ipex` / `tpu_int8` / `inc` / `quark` | Intel/TPU/昇腾 等 |
+| **其他** | `gguf` / `torchao` / `rtn` / `auto-round` / `hqq` 等 | 各生态格式 |
+
+**使用方式**：
+
+```bash
+# 4-bit AWQ 量化模型
+vllm serve TheBloke/Llama-2-7B-AWQ --quantization awq
+
+# FP8
+vllm serve neuralmagic/Meta-Llama-3-8B-FP8 --quantization fp8
+```
+
+### 29.4 量化如何"接入"模型（关键机制）
+
+量化不是把整个模型换掉，而是**替换每一层的 Linear 层的计算方式**：
+
+```mermaid
+flowchart LR
+    A["模型定义里的 Linear 层"] --> B["创建时调用 QuantizeMethodBase.create_weights()"]
+    B --> C["权重以量化格式存储<br/>(如 int4 打包)"]
+    C --> D["前向时调用 apply()"]
+    D --> E["反量化 → fp16 计算<br/>或直接用量化 kernel 计算"]
+```
+
+- 每种量化方法提供自定义的 CUDA/Triton kernel（`kernels/` 目录）；
+- `get_min_capability` 保证只有算力达标的 GPU 才用对应 kernel（如 AWQ 需要 sm_70+）。
+
+---
+
+## 30. 推测解码（Speculative Decoding）—— 提 decode 速度
+
+**目录**：`vllm/v1/spec_decode/`
+
+### 30.1 核心思想：用小模型"猜"，大模型"验证"
+
+自回归生成是**串行**的（每次只能生成 1 个 token），这限制了吞吐。推测解码的思路：
+
+```mermaid
+flowchart LR
+    A["小模型(草稿模型)<br/>快速猜 5 个 token"] --> B["大模型(目标模型)<br/>一次性验证这 5 个"]
+    B --> C["验证通过的 token 直接接受<br/>不通过的就地停止"]
+    C --> D["接受 k 个 → 等价于一步生成了 k 个 token"]
+```
+
+- 草稿模型很小很快，猜 token 成本低；
+- 目标模型**一次前向**验证多个 token（因为验证是并行的）；
+- 只要猜得准，就等价于"一步生成多个 token"，**加速 decode**。
+
+### 30.2 vLLM 支持的三种方法
+
+**文件**：`vllm/v1/spec_decode/`
+
+| 方法 | 文件 | 草稿来源 |
+|------|------|---------|
+| **ngram（prompt lookup）** | `ngram_proposer.py` | 不需要额外模型！在已有文本里找 n-gram 匹配，用后续 token 当草稿 |
+| **EAGLE** | `eagle.py` | 训练一个轻量草稿模型（`draft_model_config`） |
+| **Medusa** | `medusa.py` | 在目标模型上挂多个"头"同时预测多个后续 token |
+
+**NgramProposer**（`ngram_proposer.py`）零额外成本，源码里几个关键参数：
+- `prompt_lookup_min` / `prompt_lookup_max`：匹配的 n-gram 长度范围；
+- `num_speculative_tokens`：每次猜几个 token（`self.k`）。
+
+**EagleProposer**（`eagle.py`）用独立草稿模型，从源码可见：
+- `draft_model_config`：草稿模型的配置；
+- `hidden_size`：草稿模型 hidden size 可与目标模型不同（如 Llama 3.3 70B）；
+- 草稿模型也有自己的 KV cache、CUDA graph。
+
+### 30.3 推测解码在调度器里的体现
+
+回忆 §10.1 的 `num_tokens_with_spec`：推测解码时，一个请求的 `num_tokens_with_spec` 会比实际 token 数多出 `num_speculative_tokens` 个"草稿 token"，调度器会为这些草稿 token 预留 KV cache 槽位（`num_lookahead_tokens`）。
+
+```mermaid
+flowchart TD
+    A["调度器"] --> B["为请求预留 num_lookahead_tokens 个槽位"]
+    B --> C["草稿模型生成候选 token"]
+    C --> D["目标模型一次前向验证"]
+    D --> E["接受/拒绝草稿 token"]
+    E --> F["被拒绝的 token 释放对应 KV 槽位"]
+```
+
+**使用方式**：
+
+```bash
+# ngram 推测解码（无需额外模型）
+vllm serve model --speculative-config '{"method": "ngram", "num_speculative_tokens": 5}'
+
+# EAGLE（需草稿模型）
+vllm serve model --speculative-config '{"method": "eagle", "model": "draft-model-path"}'
+```
+
+---
+
+## 31. 并行策略：TP / PP / DP / EP
+
+**文件**：`vllm/config/parallel.py`（`ParallelConfig`）
+
+当单张卡放不下模型，或想提高并发，需要多卡并行。vLLM 支持四种正交的并行维度：
+
+```mermaid
+flowchart TD
+    A["多卡并行"] --> B["TP 张量并行<br/>tensor_parallel_size"]
+    A --> C["PP 流水线并行<br/>pipeline_parallel_size"]
+    A --> D["DP 数据并行<br/>data_parallel_size"]
+    A --> E["EP 专家并行<br/>(MoE 专用)"]
+```
+
+### 31.1 TP（Tensor Parallel，张量并行）
+
+把**每一层的权重矩阵按列/行切分**到多张卡上：
+
+```mermaid
+flowchart LR
+    subgraph 单卡
+        A1["权重 W (d_in × d_out)"] --> A2["完整计算"]
+    end
+    subgraph TP=4
+        B1["W 切成 4 份<br/>每卡 d_out/4 列"] --> B2["每卡算一部分<br/>all-reduce 汇总"]
+    end
+```
+
+对应源码 `vllm/model_executor/layers/linear.py`：
+
+- **`ColumnParallelLinear`**：权重按**列**切分，输出维度被拆分（每个 rank 算 d_out/tp 个输出）；
+- **`RowParallelLinear`**：权重按**行**切分，输入被拆分，输出需要 **all-reduce** 汇总。
+
+**关键点**：TP 需要 GPU 之间**高速通信**（NVLink/InfiniBand），因为每层前向都要 all-reduce。TP 通常用于单机多卡（NVLink 环境）。
+
+### 31.2 PP（Pipeline Parallel，流水线并行）
+
+把模型**按层切分**成多段，每张卡放一段：
+
+```mermaid
+flowchart LR
+    A["卡0: 第1-8层"] --> B["卡1: 第9-16层"]
+    B --> C["卡2: 第17-24层"]
+    C --> D["卡3: 第25-32层"]
+```
+
+- 不同卡负责不同层，中间结果跨卡传递；
+- 通信量比 TP 小（只在层边界传一次）；
+- 容易出现"流水线气泡"（pipeline bubble），需要微批次（microbatch）优化。
+
+### 31.3 DP（Data Parallel，数据并行）
+
+**复制完整模型**到多张卡，每张卡服务不同的请求：
+
+```mermaid
+flowchart LR
+    A["卡0: 完整模型, 服务请求 A,B"] --> C["负载均衡"]
+    B["卡1: 完整模型, 服务请求 C,D"] --> C
+```
+
+- 各卡独立，**无通信**；
+- 提升**并发吞吐**，但不解决"单模型太大放不下"的问题；
+- `ParallelConfig` 里还有 `data_parallel_external_lb`（外部负载均衡，K8s 场景）、`data_parallel_hybrid_lb`（混合负载均衡）等模式。
+
+### 31.4 EP（Expert Parallel，专家并行，MoE 专用）
+
+MoE 模型有多个"专家"（expert）子网络，可以把专家分布到不同卡：
+
+```mermaid
+flowchart LR
+    A["MoE 层: 8 个专家"] --> B["卡0: 专家 0,1"]
+    A --> C["卡1: 专家 2,3"]
+    A --> D["卡2: 专家 4,5"]
+```
+
+`ParallelConfig` 里的 `enable_expert_parallel`、`enable_eplb`（expert parallel load balancing，专家负载均衡）控制这一行为。
+
+### 31.5 并行策略选择速查
+
+| 场景 | 推荐 |
+|------|------|
+| 单卡放不下模型，单机多卡（NVLink） | **TP** |
+| 多机、模型极大、通信有限 | **PP**（或 TP+PP） |
+| 模型放得下，但并发不够 | **DP** |
+| MoE 模型 | **EP**（配合 EPLB） |
+| 超大规模 | TP + PP + DP 组合 |
+
+**使用方式**：
+
+```bash
+vllm serve model --tensor-parallel-size 4          # 4 卡 TP
+vllm serve model --pipeline-parallel-size 2         # 2 段 PP
+vllm serve model -tp 2 -pp 2                        # TP=2 + PP=2
+```
+
+---
+
+# 第七部分：功能特性与架构演进
+
+## 32. 结构化输出（Structured Outputs）—— 让模型输出合法 JSON
+
+**目录**：`vllm/v1/structured_output/`
+
+### 32.1 为什么需要
+
+让 LLM 自由生成 JSON，经常会有**语法错误、多一个逗号、少一个引号**。结构化输出通过**约束采样（constrained decoding）**，强制模型每一步生成的 token 都必须符合给定的 Schema/正则/语法。
+
+### 32.2 支持的约束类型
+
+**文件**：`vllm/v1/structured_output/request.py` 的 `get_structured_output_key`：
+
+| 类型 | `StructuredOutputOptions` | 说明 |
+|------|--------------------------|------|
+| JSON Schema | `JSON` | 严格按 Schema 输出 |
+| JSON Object | `JSON_OBJECT` | 输出任意合法 JSON 对象 |
+| 正则表达式 | `REGEX` | 按正则约束 |
+| 选项列表 | `CHOICE` | 从给定选项里选 |
+| 语法（GBNF 等） | `GRAMMAR` | 自定义文法 |
+| 结构标签 | `STRUCTURAL_TAG` | 结构化标签 |
+
+### 32.3 约束是如何"强制"的（核心机制）
+
+约束采样的关键：**在每一步采样前，用文法状态机算出"当前允许哪些 token"，把不允许的 token 的 logits 置为 −∞**。
+
+```mermaid
+flowchart TD
+    A["模型输出 logits"] --> B["结构化输出管理器<br/>维护一个文法状态机"]
+    B --> C["根据当前状态, 生成 bitmask<br/>(哪些 token 合法)"]
+    C --> D["apply_grammar_bitmask()<br/>非法 token 的 logits = -inf"]
+    D --> E["采样器只能从合法 token 里选"]
+    E --> F["保证最终输出严格合法"]
+```
+
+**后端实现**（`vllm/v1/structured_output/`）：
+
+| 文件 | 后端 | 说明 |
+|------|------|------|
+| `backend_xgrammar.py` | XGrammar | 默认，最快 |
+| `backend_outlines.py` | Outlines | 通用 |
+| `backend_guidance.py` | Guidance | 兼容 |
+| `backend_lm_format_enforcer.py` | LM Format Enforcer | 兼容 |
+
+**使用方式**：
+
+```python
+sampling_params = SamplingParams(
+    structured_outputs=StructuredOutputsParams(json={
+        "type": "object",
+        "properties": {"name": {"type": "string"}, "age": {"type": "integer"}},
+        "required": ["name", "age"],
+    })
+)
+```
+
+---
+
+## 33. LoRA / 多适配器 —— 一个底座，多个微调
+
+**目录**：`vllm/lora/`
+
+### 33.1 核心思想
+
+LoRA（Low-Rank Adaptation）在冻结的底座模型上，为每层插入**低秩矩阵**作为增量。vLLM 可以把多个 LoRA 适配器**都加载进显存**，不同请求指定不同适配器，**动态切换**。
+
+```mermaid
+flowchart LR
+    A["底座模型<br/>(冻结, 共享)"] --> B["LoRA 适配器1<br/>(代码微调)"]
+    A --> C["LoRA 适配器2<br/>(数学微调)"]
+    A --> D["LoRA 适配器3<br/>(翻译微调)"]
+    B --> E["不同请求带不同 lora_request"]
+    C --> E
+    D --> E
+```
+
+### 33.2 `LoRARequest` 结构
+
+**文件**：`vllm/lora/request.py`
+
+```python
+class LoRARequest(msgspec.Struct, ...):
+    lora_name: str          # 适配器名字
+    lora_int_id: int        # 全局唯一整数 ID（>0）
+    lora_path: str          # 适配器权重路径
+    long_lora_max_len: Optional[int] = None
+    base_model_name: Optional[str] = None
+```
+
+关键：`lora_int_id` 必须全局唯一，用于在显存里索引对应的适配器权重。
+
+### 33.3 使用方式
+
+```bash
+# 启动时预加载 LoRA
+vllm serve base-model --enable-lora --lora-modules my-lora=/path/to/lora
+
+# 请求时指定（OpenAI API 通过 model 字段传适配器名）
+```
+
+在线 API 里，通过 `/v1/load_lora_adapter` 和 `/v1/unload_lora_adapter` 端点**动态加载/卸载**适配器（见 §26 路由表）。
+
+---
+
+## 34. V0 vs V1 引擎差异 —— 理解 vLLM 的架构演进
+
+**文件**：`vllm/envs.py`（`VLLM_USE_V1`）、`vllm/engine/arg_utils.py`（`_is_v1_supported_oracle`）
+
+### 34.1 版本现状
+
+vLLM 0.11.0 里，**V1 是默认引擎**：
+
+```python
+# vllm/envs.py
+VLLM_USE_V1: bool = True    # 默认 True
+```
+
+但 vLLM 保留了一个"oracle"（`_is_v1_supported_oracle`）来判断某个模型/配置能否用 V1，不能就回退 V0：
+
+```mermaid
+flowchart TD
+    A["create_engine_config()"] --> B{"VLLM_USE_V1 用户显式设置?"}
+    B -->|"是"| C["强制遵循用户设置"]
+    B -->|"否(默认)"| D["_is_v1_supported_oracle()"]
+    D --> E{"模型/配置 V1 支持?"}
+    E -->|"是"| F["V1 引擎"]
+    E -->|"否"| G["回退 V0 引擎"]
+```
+
+### 34.2 关键差异对比
+
+| 维度 | V0（旧） | V1（新，默认） |
+|------|---------|---------------|
+| 调度模型 | 显式区分 prefill / decode 两阶段 | **统一模型**（`num_computed_tokens` 追 `num_tokens_with_spec`） |
+| chunked prefill | 需手动开启 | **默认开启** |
+| 前缀缓存 | 需手动开启 | **默认开启**（生成任务） |
+| 架构 | 单进程耦合 | **前端/核心分离**（`LLMEngine` + `EngineCore`，可多进程 + ZMQ） |
+| 在线引擎 | `AsyncLLMEngine` | `AsyncLLM`（`output_handler` 后台循环） |
+| 代码位置 | `vllm/engine/`、`vllm/core/` | `vllm/v1/engine/`、`vllm/v1/core/` |
+
+**核心思想**：V1 把引擎拆成"前端（Processor/OutputProcessor）"和"核心（EngineCore）"两层，前端处理输入/输出格式，核心专注调度+推理，两者通过 `EngineCoreClient`（进程内 / ZMQ 多进程）通信。这是为了支持更复杂的部署（多进程、DP、PD 分离）。
+
+### 34.3 V1 引擎的核心优势（总结）
+
+1. **统一调度模型**：天然覆盖 chunked prefill、前缀缓存、推测解码（见 §10）；
+2. **默认开 chunked prefill + 前缀缓存**：开箱即得性能优化；
+3. **前后端解耦**：EngineCore 可独立进程运行，支持 DP、异步调度、PD 分离等高级特性。
+
+---
+
+## 35. Prefill/Decode 分离（Disaggregated Prefill，PD 分离）
+
+**目录**：`vllm/distributed/kv_transfer/`
+
+### 35.1 为什么分离
+
+prefill（预填充）和 decode（解码）的**资源特征完全不同**：
+
+| 阶段 | 计算特征 | 瓶颈 |
+|------|---------|------|
+| prefill | 大量 token 并行计算 | **算力（compute-bound）** |
+| decode | 每次 1 个 token，访存密集 | **显存带宽（memory-bound）** |
+
+把它们混在同一台机器，会导致：长 prompt 的 prefill 高峰挤压 decode 的延迟，两者互相干扰。
+
+**PD 分离**把 prefill 和 decode 部署到**不同机器**，各自独立扩缩容。
+
+### 35.2 核心机制：跨实例传输 KV cache
+
+**目录**：`vllm/distributed/kv_transfer/README.md` 描述了三层抽象：
+
+```mermaid
+flowchart TD
+    A["KV Connector<br/>(连接 vLLM, 最上层)"] --> B["KV Lookup Buffer<br/>(按 token 查找 KV, 中间层)"]
+    B --> C["KV Pipe<br/>(FIFO 张量传输, 最底层)"]
+```
+
+| 层 | 职责 | 关键 API |
+|----|------|---------|
+| **KV Pipe** | FIFO 的 torch.tensor 传输 | `send_tensor` / `recv_tensor` |
+| **KV Lookup Buffer** | 按 token 查 KV（类似 SQL 语义） | `insert` / `drop_select` |
+| **KV Connector** | 连接 pipe + buffer 到 vLLM | `send_kv_caches_and_hidden_states` / `recv_kv_caches_and_hidden_states` |
+
+**为什么需要 Lookup Buffer（关键）**：prefill 机器和 decode 机器的**处理顺序可能不一致**。高 QPS 下，prefill 可能按 A→B→C 顺序处理，但 decode 机器可能先处理 C。FIFO pipe 无法应对乱序，所以需要 Lookup Buffer 做"按 key（token）查找"。
+
+### 35.3 PD 分离工作流
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as 客户端
+    participant P as Prefill 实例
+    participant D as Decode 实例
+
+    U->>P: 提交请求(长 prompt)
+    P->>P: prefill 计算, 生成 KV cache
+    P->>D: 通过 KV Connector 传输 KV cache
+    P-->>U: (prefill 完成)
+    D->>D: 接收 KV, 继续 decode
+    D-->>U: 流式返回生成的 token
+```
+
+这是云厂商**高并发部署大模型**的前沿方向，vLLM 通过 KV 传输抽象层支持。
+
+---
+
+## 36. 全文档知识地图（最终整合）
+
+```mermaid
+flowchart TD
+    subgraph 基础链路
+        A1["调用入口<br/>LLM / vllm serve"]
+        A2["引擎初始化<br/>加载模型 + KV cache + 调度器"]
+        A3["调度推理<br/>schedule → forward → sample"]
+        A4["结果输出<br/>RequestOutput / SSE"]
+    end
+    subgraph 核心技术
+        B1["PagedAttention<br/>分页 KV cache"]
+        B2["Continuous Batching<br/>连续批处理"]
+        B3["CUDA Graph<br/>降低启动开销"]
+        B4["硬件抽象层<br/>多硬件适配"]
+    end
+    subgraph 性能优化
+        C1["量化<br/>AWQ/GPTQ/FP8"]
+        C2["推测解码<br/>ngram/EAGLE/Medusa"]
+        C3["并行<br/>TP/PP/DP/EP"]
+    end
+    subgraph 功能与演进
+        D1["结构化输出"]
+        D2["LoRA 多适配器"]
+        D3["V0 vs V1"]
+        D4["PD 分离"]
+    end
+    A1 --> A2 --> A3 --> A4
+    B1 --> A3
+    B2 --> A3
+    B3 --> A3
+    B4 --> A2
+    C1 --> A2
+    C2 --> A3
+    C3 --> A2
+    D1 --> A4
+    D2 --> A2
+    D3 --> A2
+    D4 --> A2
+```
+
+---
+
+## 37. 最终学习路径建议
+
+```mermaid
+flowchart LR
+    A["阶段1: 跑通<br/>离线 LLM + 在线 serve"] --> B["阶段2: 读懂<br/>PagedAttention + 调度"]
+    B --> C["阶段3: 优化<br/>量化 + 推测解码 + 并行"]
+    C --> D["阶段4: 进阶<br/>结构化输出 + LoRA"]
+    D --> E["阶段5: 架构<br/>V1 引擎 + PD 分离 + 硬件适配"]
+    E --> F["阶段6: 实战<br/>租云 GPU 部署 + 调优"]
+```
+
+至此，这份文档已覆盖 vLLM 的：
+
+1. **完整调用链路**（离线 + 在线两条线）；
+2. **四大核心技术**（PagedAttention / 连续批处理 / CUDA Graph / 硬件抽象）；
+3. **三大性能优化**（量化 / 推测解码 / 并行）；
+4. **两大功能特性**（结构化输出 / LoRA）；
+5. **架构演进**（V0→V1 / PD 分离）；
+6. **源码级实现细节**（block 引用计数复用 / 昇腾 OOT 插件）。
+
+所有内容均基于本机 vLLM 0.11.0 真实源码，并标注了文件路径，可随时对照精读。
