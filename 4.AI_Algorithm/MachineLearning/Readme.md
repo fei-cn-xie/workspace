@@ -341,6 +341,8 @@ $$
 
 ## 2. 机器学习
 
+> https://scikit-learn.org/stable/user_guide.html
+
 - 编码环境准备
 ```sh
 pip install notebook jupyterlib
@@ -620,17 +622,44 @@ $$Loss = \dfrac{1}{n}(\sum_{i=1}^{n}(f(x_i) - y_i)^2 + \lambda\sum_{i=1}^{k}\the
 
 ### 2.3 线性回归
 
-
+$$
+y = wx + b
+$$
 
 
 ### 2.4 逻辑回归
+逻辑回归是分类算法，不是回归算法。  
+
+$$
+y = \dfrac{1}{1 + e^{w_1x_1 + w_2x_2 + ... + w_kx_k + b}}
+$$
 
 
+交叉熵
+
+$$
+P(y\vert x;\beta) = P(y = 1\vert x)^y(1-P(y=1\vert x;\beta))^{1-y} \\
+= (\dfrac{1}{1 + e^{-({\beta}^Tx)}})^y(1 - \dfrac{1}{1 + e^{-({\beta}^Tx)}})^{1-y}
+$$
 
 ## 3. 深度学习
 
-
 ### 3.1 多层感知机
+
+### 3.1 单层感知机 Perceptron
+人工神经网络(ANN:Artificial Neural Network)最早的灵感来自生物神经元。生物神经元由树突(接收信号)、细胞体(整合信号)和轴突(输出信号)组成。  
+当树突收到的电信号之和超过某个阈值时，神经元就会"激活"并通过轴突向下游传递信号;否则保持静默。  
+
+1957年，Rosenblatt把这个过程抽象成了一个数学模型感知机(Perceptron)它把"接收多个输入、按不同权重加权求和、超过阈值就输出1，否则输出0"这一过程压缩成了
+一行公式。
+
+对于单层感知机，无法解决异或问题。
+
+### 3.2 多层感知机 MLP
+> 多层感知机 Multiple Layer Perceptron也称FNN(Feedforward Neural Network) 前馈神经网络
+
+![alt text](Readme/image-1.png)
+
 
 ### 3.2 反向传播机制
 
