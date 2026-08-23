@@ -35,7 +35,8 @@ import time
 # 双向队列
 
 # region
-from multiprocessing import Process, Pipe
+# 
+from multiprocessing import Process, Pipe # 
 
 def test1(con1):
     for i in range(10):
@@ -45,12 +46,14 @@ def test1(con1):
             print(f"get from test1 <====> {con1.recv()}")
         time.sleep(1)
 
+
 def test2(con2):
     for i in range(10):
         if (i < 6):
             print(f"get from test2 <====> {con2.recv()}")
         else:
             con2.send(f"send from test2 = {i}")
+
 
 
 if __name__ ==  "__main__":
@@ -63,8 +66,8 @@ if __name__ ==  "__main__":
     p1.start()
     p2.start()
 
-
 # endregion
+
 
 
 
