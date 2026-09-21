@@ -1,27 +1,29 @@
+## 使用hugging face下载模型
 
+### 环境变量
+```env
+HF_ENDPOINT=https://hf-mirror.com
+HF_HOME=D:\huggingface_modelhuggingface
+HF_TOKEN=hf_xxxx
+```
 
-## 模型下载
+### 模型下载
 
 ```sh
 pip install huggingface_hub
-hf download ornith-ai/0rnith-1.0-9B-GGUF ornith-1.0-9b-04_K_M.gguf
+hf download hf://OBLITERATUS/Qwen3.8-27B-OBLITERATED/Qwen3.8-27B-OBLITERATED-Q6_K.gguf
+hf download hf://empero-ai/Qwen3.8-9B-Distill-GGUF/Qwen3.8-9B-Q8_0.gguf
 ```
 
-## llama 启动
+
+## llama启动
+> https://llama.app/docs/cli
+> https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
 
 ```sh
-./llama-cli.exe -m "D:\models\ornith-1.0-9b-Q4_K_M.gguf" -p "你好，介绍一下你自己" -n 256 -c 4096 -ngl 99
+llama serve -m D:\huggingface_model\huggingface\hub\models--OBLITERATUS--Qwen3.8-27B-OBLITERATED\snapshots\a58c3b53b3ce71551eafde2ed5ec8df48e0f4ff8\Qwen3.8-27B-OBLITERATED-Q6_K.gguf
 
-llama-cli -m "D:\huggingface_model\huggingface\hub\models--ornith-ai--Ornith-1.0-9B-GGUF\snapshots\3296bc7a404871a72ac3f1903f561459c09b5c17\ornith-1.0-9b-Q4_K_M.gguf"
+llama serve -m D:\huggingface_model\huggingface\hub\models--empero-ai--Qwen3.8-9B-Distill-GGUF\snapshots\760121cd70bb4c36b2b5ec58eb765e0df5987efe\Qwen3.8-9B-Q8_0.gguf --ctx-size 12288 --threads 6
 
+llama serve -m D:\huggingface_model\huggingface\hub\models--empero-ai--Qwen3.8-9B-Distill-GGUF\snapshots\760121cd70bb4c36b2b5ec58eb765e0df5987efe\Qwen3.8-9B-Q8_0.gguf --ctx-size 0 --threads 6
 ```
-
-
-## 启动后台服务
-
-```sh
-llama-server -m 模型文件名
-
-```
-
-> ollama下载的模型，通过改后缀名称为.gguf，也可使用。
