@@ -30,13 +30,15 @@ def softmax(a):
     return y
 
 # Tanh 函数
-
+def tanh(x):
+    return np.tanh(x)
 
 
 if __name__ == '__main__':
-    x = np.array([-4.0, -3.0, -2.0, -1.0, 0, 1.0, 2.0, 3.0])
+    x = np.array([-4.0, -3.0, -2.0, -1.0, 0, 1.0, 2.0, 3.0, 4.0])
     print(f"x = {x}")
     print("Step 函数 = ", step_function(x))
     print("Sigmoid = ", sigmoid(x))
     print("ReLu = ", relu(x))
     print("Softmax = ", softmax(x), f"sum = {sum(softmax(x))}")
+    print("Tanh = ", tanh(x))
