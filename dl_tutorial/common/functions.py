@@ -33,6 +33,9 @@ def softmax(a):
 def tanh(x):
     return np.tanh(x)
 
+# 恒等函数
+def identity(x):
+    return x
 
 if __name__ == '__main__':
     x = np.array([-4.0, -3.0, -2.0, -1.0, 0, 1.0, 2.0, 3.0, 4.0])
